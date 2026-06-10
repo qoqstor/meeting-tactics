@@ -198,18 +198,56 @@
     const latin = (t.match(/[A-Za-z]/g)||[]).length;
     return han < 2 && latin > 3;                                        // 幾乎沒中文且以英文為主
   }
-  async function translateSeg(seg, container){
+  const transQueue = [];
+  let transTimer = null, transBusy = false;
+  function queueTranslate(seg, container){
+    transQueue.push({seg, container});
+    scheduleTrans();
+  }
+  function scheduleTrans(){
+    if(transTimer || transBusy || !transQueue.length) return;
+    transTimer = setTimeout(runTransBatch, 10000); // 每 10 秒批次翻一次，省請求數
+  }
+  function attachZh(item, zh){
+    item.seg.zh = zh;
+    const d = document.createElement("div");
+    d.className = "trans"; d.textContent = zh;
+    item.container.appendChild(d);
+  }
+  async function runTransBatch(){
+    transTimer = null;
+    if(!transQueue.length) return;
+    transBusy = true;
+    const batch = transQueue.splice(0, transQueue.length);
     try{
-      const zh = await callClaude(
-        "你是會議即時翻譯。把使用者提供的會議發言翻成自然流暢的繁體中文，保留專有名詞原文。只輸出譯文，不要任何說明。",
-        seg.text
-      );
-      seg.zh = zh;
-      const d = document.createElement("div");
-      d.className = "trans"; d.textContent = zh;
-      container.appendChild(d);
+      if(batch.length === 1){
+        const zh = await callClaude(
+          "你是會議即時翻譯。把這段會議發言翻成自然流暢的繁體中文，保留專有名詞原文。只輸出譯文。",
+          batch[0].seg.text, true
+        );
+        attachZh(batch[0], zh);
+      } else {
+        const numbered = batch.map((b,i)=> (i+1) + ". " + b.seg.text.replace(/\n/g," ")).join("\n");
+        const out = await callClaude(
+          "你是會議即時翻譯。以下是多段編號的會議發言，逐段翻成自然流暢的繁體中文，保留專有名詞原文。輸出格式：每行一段，以相同編號開頭（如「1. 譯文」），不要任何其他說明。",
+          numbered, true
+        );
+        const map = {};
+        out.split(/\n+/).forEach(l=>{
+          const m = l.match(/^(\d+)[\.、:：]\s*(.+)$/);
+          if(m) map[m[1]] = m[2].trim();
+        });
+        batch.forEach((b,i)=>{ if(map[i+1]) attachZh(b, map[i+1]); });
+      }
       const box = $("transcriptBox"); box.scrollTop = box.scrollHeight;
-    }catch(err){ setStatus("即時翻譯失敗：" + err.message); }
+    }catch(err){
+      const limited = /quota|rate|429/i.test(err.message);
+      setStatus(limited ? "即時翻譯被 Gemini 免費額度限流，稍後自動重試（可為 Gemini 綁定計費解除限制）" : "即時翻譯失敗：" + err.message);
+      if(limited) batch.forEach(b=> transQueue.push(b)); // 限流的段落留著下一批重試
+    }finally{
+      transBusy = false;
+      scheduleTrans();
+    }
   }
   $("transBtn").addEventListener("click", ()=>{
     liveTrans = !liveTrans;
@@ -337,7 +375,7 @@
     const wrap = document.createElement("div"); wrap.className = "body";
     const p = document.createElement("p"); p.textContent = text; wrap.appendChild(p);
     div.appendChild(wrap);
-    if(liveTrans && needsZh(text)) translateSeg(seg, wrap);
+    if(liveTrans && needsZh(text)) queueTranslate(seg, wrap);
     const box = $("transcriptBox");
     if(interimEl) box.insertBefore(div, interimEl); else box.appendChild(div);
     box.scrollTop = box.scrollHeight;
@@ -372,7 +410,7 @@
       let text = "";
       if($("asrProv").value === "gemini"){
         const b64 = await blobToBase64(blob);
-        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + encodeURIComponent(key), {
+        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + encodeURIComponent(key), {
           method:"POST",
           headers:{ "Content-Type":"application/json" },
           body: JSON.stringify({
@@ -416,7 +454,7 @@
       };
       mr.onstop = ()=>{ if(active) cycle(); };
       mr.start();
-      setTimeout(()=>{ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} }, 8000);
+      setTimeout(()=>{ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} }, 15000);
     }
     return {
       start(){ if(active) return; active = true; cycle(); },
@@ -550,11 +588,12 @@
   $("lang").addEventListener("change", ()=>{ if(recording){ stopRec(); startRec(); } });
 
   /* ---------- Claude API ---------- */
-  async function callClaude(systemPrompt, userPrompt){
+  async function callClaude(systemPrompt, userPrompt, lite){
     if($("llmProv").value === "gemini"){
       const gkey = $("geminiKey").value.trim();
       if(!gkey) throw new Error("請先填入 Gemini API Key");
-      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + encodeURIComponent(gkey), {
+      const gmodel = lite ? "gemini-2.5-flash-lite" : "gemini-2.5-flash";
+      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(gkey), {
         method:"POST",
         headers:{ "Content-Type":"application/json" },
         body: JSON.stringify({
