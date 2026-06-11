@@ -58,6 +58,8 @@
   .trans{font-size:13px; color:var(--teal-dark); margin-top:2px; line-height:1.6}
   .trans::before{content:"譯 "; font-size:10px; font-weight:700; color:#fff; background:var(--teal);
     border-radius:4px; padding:1px 4px; margin-right:5px; vertical-align:1px}
+  .trans.pending{color:var(--ink-2); font-style:italic}
+  .trans.pending::before{background:#B9B6AD}
   #transBtn.on{background:#EDF6F3; border-color:var(--teal); color:var(--teal-dark); font-weight:600}
   .interim{color:var(--ink-2); font-style:italic; padding:6px 0; font-size:14px}
   .seg.pending p{color:var(--ink-2); font-style:italic}
@@ -221,19 +223,19 @@
     const latin = (t.match(/[A-Za-z]/g)||[]).length;
     return han < 2 && latin > 3;                                        // 幾乎沒中文且以英文為主
   }
-  async function translateSeg(seg, container){
+  async function translateSeg(seg, ph){
     try{
       const zh = await callClaude(
         "你是會議即時翻譯。把這段會議發言翻成自然流暢的繁體中文，保留專有名詞原文。只輸出譯文，不要任何說明。",
         seg.text, true
       );
       seg.zh = zh;
-      const d = document.createElement("div");
-      d.className = "trans"; d.textContent = zh;
-      container.appendChild(d);
-      makeEditable(d, ()=> seg.zh, v=>{ seg.zh = v; });
+      ph.classList.remove("pending");
+      ph.textContent = zh;
+      makeEditable(ph, ()=> seg.zh, v=>{ seg.zh = v; });
       const box = $("transcriptBox"); box.scrollTop = box.scrollHeight;
     }catch(err){
+      if(ph && ph.parentNode) ph.remove();
       const limited = /quota|rate|429/i.test(err.message);
       setStatus(limited ? "即時翻譯被 Gemini 額度限流，此段未翻（可為 Gemini 綁定計費解除限制）" : "即時翻譯失敗：" + err.message);
     }
@@ -390,7 +392,12 @@
       if(!segments.length){ $("summarizeBtn").disabled = true; $("exportBtn").disabled = true; }
     });
     div.appendChild(del);
-    if(liveTrans && needsZh(text)) translateSeg(seg, wrap);
+    if(liveTrans && needsZh(text)){
+      const ph = document.createElement("div");
+      ph.className = "trans pending"; ph.textContent = "…翻譯中";
+      wrap.appendChild(ph);
+      translateSeg(seg, ph);
+    }
     const box = $("transcriptBox");
     if(atEl && atEl.parentNode) atEl.parentNode.insertBefore(div, atEl);
     else if(interimEl) box.insertBefore(div, interimEl);
@@ -503,8 +510,7 @@
         const frames = activity.filter(a => a.t >= startedAtMs && a[voicedKey]).length; // 每格 100ms
         const need = voicedKey === "mic" ? 5 : 3;
         if(frames >= need && ev.data && ev.data.size > 2000){
-          const pend = addPending(who, timeStr);
-          transcribeChunk(ev.data, timeStr, who, frames * 100, 0, pend);
+          transcribeChunk(ev.data, timeStr, who, frames * 100, 0);
         }
       };
       mr.start();
