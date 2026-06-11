@@ -58,8 +58,18 @@
   .trans{font-size:13px; color:var(--teal-dark); margin-top:2px; line-height:1.6}
   .trans::before{content:"譯 "; font-size:10px; font-weight:700; color:#fff; background:var(--teal);
     border-radius:4px; padding:1px 4px; margin-right:5px; vertical-align:1px}
+  .trans.pending{color:var(--ink-2); font-style:italic}
+  .trans.pending::before{background:#B9B6AD}
   #transBtn.on{background:#EDF6F3; border-color:var(--teal); color:var(--teal-dark); font-weight:600}
   .interim{color:var(--ink-2); font-style:italic; padding:6px 0; font-size:14px}
+  .seg.pending p{color:var(--ink-2); font-style:italic}
+  .seg-del{flex:0 0 auto; border:none; background:none; color:var(--ink-2); font-size:14px;
+    padding:2px 6px; margin-top:2px; opacity:0; transition:opacity .15s; cursor:pointer; border-radius:6px}
+  .seg:hover .seg-del{opacity:1}
+  .seg-del:hover{color:#fff; background:var(--rec); border:none}
+  .seg [contenteditable]{cursor:text; border-radius:4px; padding:1px 3px; margin:-1px -3px}
+  .seg [contenteditable]:hover{background:#FAF8F0}
+  .seg [contenteditable]:focus{outline:2px solid var(--teal); background:#fff}
   .empty{color:var(--ink-2); font-size:13px; text-align:center; margin-top:40px; line-height:1.9}
 
   .advice-card{border:1px solid var(--line); border-left:3px solid var(--teal); border-radius:8px;
@@ -75,6 +85,7 @@
   .settings input{font:12px var(--mono); border:1px solid var(--line); border-radius:6px;
     padding:5px 8px; width:230px}
   #hpBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
+  #recModeBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   footer{padding:8px 18px; border-top:1px solid var(--line); background:var(--panel);
     font-size:12px; color:var(--ink-2); display:flex; gap:14px; align-items:center; flex-wrap:wrap}
   .meter{display:inline-flex; align-items:center; gap:5px}
@@ -93,9 +104,11 @@
     <option value="en-US">English (US)</option>
     <option value="ja-JP">日本語</option>
     <option value="ko-KR">한국어（韓文）</option>
+    <option value="auto">中/日混合（自動偵測）</option>
   </select>
   <button id="tabBtn" title="擷取 Teams／Meet 的會議聲音，用於自動分辨我方／對方">🔗 連接會議音訊</button>
   <button id="transBtn" title="外語段落自動翻成繁體中文，顯示在原文下方">🈂 即時翻譯：關</button>
+  <button id="recModeBtn" title="一鍵開啟完整會議記錄：我方與對方都走 API 高品質轉文字">📝 記錄模式：關</button>
   <div class="spacer"></div>
   <button id="recBtn" class="btn-rec idle"><span class="dot"></span><span id="recLabel">開始錄音</span></button>
   <button id="summarizeBtn" disabled>產生會議摘要</button>
@@ -107,8 +120,13 @@
     <label style="display:flex;align-items:center;gap:5px;align-self:flex-end;padding-bottom:6px"><input type="checkbox" id="micApi">我方也用 API 轉（更準）</label>
     <label>Anthropic Key（本機開啟時·顧問/摘要）<br><input type="password" id="anthropicKey" placeholder="sk-ant-..."></label>
     <label>Gemini Key（可取代左邊兩者）<br><input type="password" id="geminiKey" placeholder="AIza..."></label>
-    <label>轉文字用<br><select id="asrProv"><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></label>
-    <label>顧問/摘要用<br><select id="llmProv"><option value="anthropic">Claude</option><option value="gemini">Gemini</option></select></label>
+    <label>轉文字用<br><select id="asrProv"><option value="openai">OpenAI</option><option value="gemini" selected>Gemini</option></select></label>
+    <label>顧問/摘要用<br><select id="llmProv"><option value="anthropic">Claude</option><option value="gemini" selected>Gemini</option></select></label>
+    <label>我方收音靈敏度<br><select id="micSens">
+      <option value="0.05">低（環境吵雜）</option>
+      <option value="0.03" selected>中（建議）</option>
+      <option value="0.015">高（講話小聲）</option>
+    </select></label>
     <label>Gemini 模型<br><select id="geminiModel">
       <option value="gemini-3.1-flash-lite" selected>3.1 Flash Lite（免費額度最高）</option>
       <option value="gemini-2.5-flash-lite">2.5 Flash Lite</option>
@@ -205,18 +223,19 @@
     const latin = (t.match(/[A-Za-z]/g)||[]).length;
     return han < 2 && latin > 3;                                        // 幾乎沒中文且以英文為主
   }
-  async function translateSeg(seg, container){
+  async function translateSeg(seg, ph){
     try{
       const zh = await callClaude(
         "你是會議即時翻譯。把這段會議發言翻成自然流暢的繁體中文，保留專有名詞原文。只輸出譯文，不要任何說明。",
         seg.text, true
       );
       seg.zh = zh;
-      const d = document.createElement("div");
-      d.className = "trans"; d.textContent = zh;
-      container.appendChild(d);
+      ph.classList.remove("pending");
+      ph.textContent = zh;
+      makeEditable(ph, ()=> seg.zh, v=>{ seg.zh = v; });
       const box = $("transcriptBox"); box.scrollTop = box.scrollHeight;
     }catch(err){
+      if(ph && ph.parentNode) ph.remove();
       const limited = /quota|rate|429/i.test(err.message);
       setStatus(limited ? "即時翻譯被 Gemini 額度限流，此段未翻（可為 Gemini 綁定計費解除限制）" : "即時翻譯失敗：" + err.message);
     }
@@ -245,7 +264,8 @@
   let audioCtx = null, tabStream = null, micStream = null;
   let tabAnalyser = null, micAnalyser = null, vadTimer = null;
   const activity = []; // {t, tab, mic}，每 100ms 取樣，保留 90 秒
-  const TH = 0.018;    // 音量門檻（RMS）
+  const TH_TAB = 0.018;                                   // 會議音訊門檻（RMS）
+  const micTH = () => parseFloat($("micSens").value);     // 我方麥克風門檻（可調）
 
   function rms(analyser, buf){
     analyser.getByteTimeDomainData(buf);
@@ -259,8 +279,8 @@
     if(vadTimer) return;
     vadTimer = setInterval(()=>{
       if(!vadBuf) vadBuf = new Uint8Array(512);
-      const tab = tabAnalyser ? rms(tabAnalyser, vadBuf) > TH : false;
-      const mic = micAnalyser ? rms(micAnalyser, vadBuf) > TH : false;
+      const tab = tabAnalyser ? rms(tabAnalyser, vadBuf) > TH_TAB : false;
+      const mic = micAnalyser ? rms(micAnalyser, vadBuf) > micTH() : false;
       activity.push({t: Date.now(), tab, mic});
       const cutoff = Date.now() - 90000;
       while(activity.length && activity[0].t < cutoff) activity.shift();
@@ -322,9 +342,24 @@
 
   /* ---------- 逐字稿 ---------- */
   let interimEl = null;
+
+  // 讓元素可直接點擊修改：Enter 或點別處即儲存；清空則還原
+  function makeEditable(el, getVal, setVal){
+    try{ el.contentEditable = "plaintext-only"; }catch(_){ el.contentEditable = "true"; }
+    el.title = "點擊文字可直接修改，Enter 儲存";
+    el.addEventListener("keydown", e=>{
+      if(e.key === "Enter"){ e.preventDefault(); el.blur(); }
+      if(e.key === "Escape"){ el.textContent = getVal(); el.blur(); }
+    });
+    el.addEventListener("blur", ()=>{
+      const t = el.textContent.trim();
+      if(t){ setVal(t); el.textContent = t; }
+      else el.textContent = getVal(); // 清空視為取消
+    });
+  }
   const whoClass = w => w === "我方" ? "me" : "them";
 
-  function addSegment(text, who, timeStr){
+  function addSegment(text, who, timeStr, atEl){
     text = text.trim(); if(!text) return;
     const seg = {time: timeStr || now(), text, who};
     segments.push(seg);
@@ -347,12 +382,46 @@
     const wrap = document.createElement("div"); wrap.className = "body";
     const p = document.createElement("p"); p.textContent = text; wrap.appendChild(p);
     div.appendChild(wrap);
-    if(liveTrans && needsZh(text)) translateSeg(seg, wrap);
+    makeEditable(p, ()=> seg.text, v=>{ seg.text = v; });
+    const del = document.createElement("button");
+    del.className = "seg-del"; del.textContent = "✕"; del.title = "刪除這句（誤偵測）";
+    del.addEventListener("click", ()=>{
+      const i = segments.indexOf(seg);
+      if(i > -1) segments.splice(i, 1);
+      div.remove();
+      if(!segments.length){ $("summarizeBtn").disabled = true; $("exportBtn").disabled = true; }
+    });
+    div.appendChild(del);
+    if(liveTrans && needsZh(text)){
+      const ph = document.createElement("div");
+      ph.className = "trans pending"; ph.textContent = "…翻譯中";
+      wrap.appendChild(ph);
+      translateSeg(seg, ph);
+    }
     const box = $("transcriptBox");
-    if(interimEl) box.insertBefore(div, interimEl); else box.appendChild(div);
+    if(atEl && atEl.parentNode) atEl.parentNode.insertBefore(div, atEl);
+    else if(interimEl) box.insertBefore(div, interimEl);
+    else box.appendChild(div);
     box.scrollTop = box.scrollHeight;
     $("summarizeBtn").disabled = false;
     $("exportBtn").disabled = false;
+  }
+
+  function addPending(who, timeStr){
+    const e = $("transcriptEmpty"); if(e) e.remove();
+    const div = document.createElement("div");
+    div.className = "seg pending";
+    const t = document.createElement("time"); t.textContent = timeStr; div.appendChild(t);
+    if(who){
+      const chip = document.createElement("span");
+      chip.className = "who " + whoClass(who); chip.textContent = who;
+      div.appendChild(chip);
+    }
+    const p = document.createElement("p"); p.textContent = "…轉文字中"; div.appendChild(p);
+    const box = $("transcriptBox");
+    if(interimEl) box.insertBefore(div, interimEl); else box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+    return div;
   }
 
   function showInterim(text){
@@ -364,9 +433,25 @@
   function clearInterim(){ if(interimEl){ interimEl.remove(); interimEl = null; } }
 
   /* ---------- API 轉文字：音訊切塊 → OpenAI（對方=會議音訊、我方=麥克風） ---------- */
-  const whisperLang = () => ({"zh-TW":"zh","en-US":"en","ja-JP":"ja","ko-KR":"ko"})[$("lang").value] || "zh";
+  const whisperLang = () => ({"zh-TW":"zh","en-US":"en","ja-JP":"ja","ko-KR":"ko","auto":""})[$("lang").value] ?? "zh";
 
   const asrKey = () => ($("asrProv").value === "gemini" ? $("geminiKey") : $("openaiKey")).value.trim();
+
+  /* ---- Gemini 模型自動備援：限流時依序改用其他模型，冷卻後回到主模型 ---- */
+  const modelCooldown = {}; // model -> 冷卻到期時間戳
+  const FALLBACK_ORDER = ["gemini-3.1-flash-lite","gemini-2.5-flash-lite","gemini-2.5-flash","gemini-3-flash","gemini-3.5-flash"];
+  function parseRetrySecs(msg){
+    const m = (msg||"").match(/retry in (\d+(?:\.\d+)?)s/i);
+    return m ? Math.ceil(parseFloat(m[1])) + 1 : 60;
+  }
+  function coolModel(model, msg){ modelCooldown[model] = Date.now() + parseRetrySecs(msg) * 1000; }
+  function pickGeminiModel(){
+    const sel = $("geminiModel").value;
+    const order = [sel].concat(FALLBACK_ORDER.filter(m => m !== sel));
+    const t = Date.now();
+    for(const m of order){ if(!(modelCooldown[m] > t)) return m; }
+    return sel; // 全部冷卻中就硬用主模型
+  }
 
   const blobToBase64 = blob => new Promise((res, rej)=>{
     const r = new FileReader();
@@ -375,62 +460,101 @@
     r.readAsDataURL(blob);
   });
 
-  async function transcribeChunk(blob, timeStr, who){
+  // 出聲不到 1 秒卻轉出 ≤3 字的超短句，多為模型幻覺（「對。」「好」「はい」…），直接捨棄
+  const looksHallucinated = (t, voicedMs) =>
+    (voicedMs || 0) < 1000 && t.replace(/[。．.,，!！?？、~～\s]/g, "").length <= 3;
+
+  async function transcribeChunk(blob, timeStr, who, voicedMs, attempt, pendEl){
     const key = asrKey();
-    if(!key) return;
+    const dropPend = ()=>{ if(pendEl && pendEl.parentNode) pendEl.remove(); };
+    if(!key){ dropPend(); return; }
     try{
       let text = "";
       if($("asrProv").value === "gemini"){
         const b64 = await blobToBase64(blob);
-        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + $("geminiModel").value + ":generateContent?key=" + encodeURIComponent(key), {
+        const gmodel = pickGeminiModel();
+        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(key), {
           method:"POST",
           headers:{ "Content-Type":"application/json" },
           body: JSON.stringify({
             contents:[{ parts:[
               { inline_data:{ mime_type:"audio/webm", data: b64 } },
-              { text:"逐字轉錄這段音訊，維持原語言。只輸出轉錄文字本身，不要任何說明；若沒有語音請輸出空白。" }
+              { text:"逐字轉錄這段音訊，維持原語言；若同一段內混用多種語言（如中文與日文），各自照原語言轉錄，不要翻譯。只輸出轉錄文字本身，不要任何說明；若沒有語音請輸出空白。" }
             ]}]
           })
         });
         const d = await r.json();
-        if(d.error){ setStatus("Gemini 轉文字失敗：" + d.error.message); return; }
+        if(d.error){
+          if(/quota|rate/i.test(d.error.message) && (attempt||0) < 2){
+            coolModel(gmodel, d.error.message);
+            const next = pickGeminiModel();
+            const wait = next !== gmodel ? 300 : 8000;
+            setStatus(gmodel.replace("gemini-","") + " 觸發上限" + (next !== gmodel ? "，自動改用 " + next.replace("gemini-","") + " 重試此段…" : "，8 秒後重試…"));
+            setTimeout(()=> transcribeChunk(blob, timeStr, who, voicedMs, (attempt||0) + 1, pendEl), wait);
+          } else { setStatus("Gemini 轉文字失敗：" + d.error.message); dropPend(); }
+          return;
+        }
         text = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
       } else {
         const fd = new FormData();
         fd.append("file", blob, "chunk.webm");
         fd.append("model", "gpt-4o-mini-transcribe");
-        fd.append("language", whisperLang());
+        const wl = whisperLang();
+        if(wl) fd.append("language", wl);
         const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
           method:"POST", headers:{ "Authorization":"Bearer " + key }, body: fd
         });
         const d = await r.json();
-        if(d.error){ setStatus("OpenAI 轉文字失敗：" + d.error.message); return; }
+        if(d.error){ setStatus("OpenAI 轉文字失敗：" + d.error.message); dropPend(); return; }
         text = (d.text||"").trim();
       }
-      if(text) addSegment(text, who, timeStr);
-    }catch(err){ setStatus("API 轉文字連線失敗：" + err.message + "（公司網路可能阻擋，可換供應商或用手機熱點測試）"); }
+      if(text && !looksHallucinated(text, voicedMs)) addSegment(text, who, timeStr, pendEl);
+      dropPend();
+    }catch(err){
+      dropPend();
+      setStatus("API 轉文字連線失敗：" + err.message + "（公司網路可能阻擋，可換供應商或用手機熱點測試）");
+    }
   }
-
   function chunkASR(getTracks, who, voicedKey){
-    // 固定 8 秒連續切塊：不間斷錄音，每 8 秒送一次轉文字（靜音段不上傳）
-    let active = false, mr = null;
-    function cycle(){
-      if(!active) return;
+    // 開口即錄；停頓 0.8 秒或滿 8 秒立即切段送出，句子講完馬上顯示
+    const SILENCE_MS = 800, MAX_MS = 8000;
+    let active = false, mr = null, watch = null, talking = false, lastVoice = 0, chunkStart = 0;
+    function beginChunk(){
       const tracks = getTracks();
-      if(!tracks || !tracks.length){ active = false; return; }
+      if(!tracks || !tracks.length) return;
+      const timeStr = now();
+      chunkStart = Date.now();
+      const startedAtMs = chunkStart;
       mr = new MediaRecorder(new MediaStream(tracks), {mimeType:"audio/webm"});
-      const chunkStart = Date.now(), timeStr = now();
       mr.ondataavailable = ev=>{
-        const voiced = activity.some(a => a.t >= chunkStart && a[voicedKey]);
-        if(voiced && ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who);
+        const frames = activity.filter(a => a.t >= startedAtMs && a[voicedKey]).length; // 每格 100ms
+        const need = voicedKey === "mic" ? 5 : 3;
+        if(frames >= need && ev.data && ev.data.size > 2000){
+          transcribeChunk(ev.data, timeStr, who, frames * 100, 0);
+        }
       };
-      mr.onstop = ()=>{ if(active) cycle(); };
       mr.start();
-      setTimeout(()=>{ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} }, 8000);
+    }
+    function endChunk(){
+      if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; }
+    }
+    function tick(){
+      if(!active) return;
+      const a = activity[activity.length - 1];
+      const voiced = a ? a[voicedKey] : false;
+      const t = Date.now();
+      if(voiced) lastVoice = t;
+      if(!talking){
+        if(voiced){ talking = true; beginChunk(); }
+      } else {
+        if(t - lastVoice > SILENCE_MS || t - chunkStart > MAX_MS){
+          talking = false; endChunk();
+        }
+      }
     }
     return {
-      start(){ if(active) return; active = true; cycle(); },
-      stop(){ active = false; if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; } }
+      start(){ if(active) return; active = true; talking = false; lastVoice = 0; watch = setInterval(tick, 150); },
+      stop(){ active = false; if(watch){ clearInterval(watch); watch = null; } talking = false; endChunk(); }
     };
   }
   const tabASR = chunkASR(()=> tabStream ? tabStream.getAudioTracks() : null, "對方", "tab");
@@ -452,7 +576,50 @@
       if(recording) startTabASR();
     } else {
       stopTabASR();
+      if(recordMode) setRecordModeUI(false);
       setStatus("已切回喇叭模式：請改用喇叭開會，讓麥克風收到對方聲音");
+    }
+  });
+
+  /* ---------- 記錄模式：一鍵開啟完整雙聲道 API 記錄 ---------- */
+  let recordMode = false;
+  function setRecordModeUI(on){
+    recordMode = on;
+    $("recModeBtn").classList.toggle("on", on);
+    $("recModeBtn").textContent = on ? "📝 記錄模式：開" : "📝 記錄模式：關";
+  }
+  $("recModeBtn").addEventListener("click", ()=>{
+    if(recordMode){
+      // 關閉記錄模式：一併還原耳機模式與我方 API 設定
+      setRecordModeUI(false);
+      $("micApi").checked = false;
+      headphone = false;
+      $("hpBtn").classList.remove("on");
+      $("hpBtn").textContent = "🎧 耳機模式：關";
+      stopTabASR();
+      setStatus("記錄模式已關閉（耳機模式與我方 API 轉文字一併關閉）");
+      return;
+    }
+    headphone = true;
+    $("hpBtn").classList.add("on");
+    $("hpBtn").textContent = "🎧 耳機模式：開";
+    $("micApi").checked = true;
+    setRecordModeUI(true);
+    const issues = [];
+    if(!asrKey()) issues.push("「轉文字用」對應的 API Key 未填");
+    if(!tabStream) issues.push("尚未按「🔗 連接會議音訊」");
+    if(issues.length){
+      setStatus("記錄模式：開（我方+對方都走 API 轉文字），但還缺：" + issues.join("、"));
+      return;
+    }
+    if(recording){
+      // 錄音中熱切換：關掉瀏覽器辨識，雙聲道改走 API
+      if(recognition){ try{ recognition.stop(); }catch(_){} recognition = null; }
+      micASR.start();
+      startTabASR();
+      setStatus("記錄模式已啟動：我方（麥克風）與對方（會議音訊）都以 API 完整記錄中");
+    } else {
+      setStatus("記錄模式：開——按「開始錄音」即以雙聲道 API 完整記錄");
     }
   });
 
@@ -461,7 +628,8 @@
 
   function buildRecognition(){
     const rec = new SR();
-    rec.lang = $("lang").value;
+    rec.lang = $("lang").value === "auto" ? "zh-TW" : $("lang").value;
+    if($("lang").value === "auto") setDiag("瀏覽器辨識不支援混語，以中文辨識；雙語會議建議用「📝 記錄模式」走 API");
     rec.continuous = true;
     rec.interimResults = true;
     rec.onresult = e=>{
@@ -567,23 +735,37 @@
     if($("llmProv").value === "gemini"){
       const gkey = $("geminiKey").value.trim();
       if(!gkey) throw new Error("請先填入 Gemini API Key");
-      const gmodel = $("geminiModel").value;
-      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(gkey), {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({
-          system_instruction:{ parts:[{ text: systemPrompt }] },
-          contents:[{ parts:[{ text: userPrompt }] }]
-        })
-      });
-      const d = await r.json();
-      if(d.error) throw new Error(d.error.message || "Gemini API 錯誤");
-      const out = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
-      if(!out) throw new Error("Gemini 沒有回傳內容");
-      return out;
+      let lastErr = null;
+      for(let i = 0; i < 3; i++){
+        const gmodel = pickGeminiModel();
+        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(gkey), {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({
+            system_instruction:{ parts:[{ text: systemPrompt }] },
+            contents:[{ parts:[{ text: userPrompt }] }],
+            generationConfig:{ maxOutputTokens: 4096 }
+          })
+        });
+        const d = await r.json();
+        if(d.error){
+          if(/quota|rate/i.test(d.error.message)){
+            coolModel(gmodel, d.error.message);
+            lastErr = new Error(gmodel.replace("gemini-","") + " 觸發上限");
+            const next = pickGeminiModel();
+            if(next !== gmodel){ setStatus(gmodel.replace("gemini-","") + " 觸發上限，自動改用 " + next.replace("gemini-","") + "…"); continue; }
+          }
+          throw new Error(d.error.message || "Gemini API 錯誤");
+        }
+        const out = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
+        if(!out) throw new Error("Gemini 沒有回傳內容");
+        return out;
+      }
+      throw (lastErr || new Error("Gemini 模型皆觸發上限，請稍後再試"));
     }
     const headers = { "Content-Type":"application/json" };
     const akey = $("anthropicKey").value.trim();
+    if(!akey) throw new Error("「顧問/摘要用」選了 Claude 但 Anthropic Key 未填——請填入金鑰，或切換成 Gemini");
     if(akey){
       headers["x-api-key"] = akey;
       headers["anthropic-version"] = "2023-06-01";
@@ -645,7 +827,7 @@
     box.prepend(card);
     try{
       const text = await callClaude(
-        "你是專業會議記錄員。逐字稿中 [我方] 是使用者、[對方] 是會議另一方。根據逐字稿與會前 Playbook，用繁體中文 Markdown 產出會議記錄，依序包含四節：## 摘要（3-5 句）、## 決策、## 行動項目（條列，依 [我方]/[對方] 標明負責方）、## 討論重點。若 Playbook 列有目標，請在摘要中對照說明哪些目標已達成、哪些未談到。只輸出會議記錄本文。",
+        "你是專業會議記錄員。逐字稿中 [我方] 是使用者、[對方] 是會議另一方，外語段落可能附有「→ 譯：」的中文翻譯可一併參考。根據逐字稿與會前 Playbook，用繁體中文 Markdown 產出正式會議紀錄，依序包含：## 會議摘要（3-5 句，若 Playbook 列有目標，對照說明哪些已達成、哪些未談到）、## 討論重點（依主題分小節整理，含雙方立場與關鍵數字）、## 決策事項、## 行動項目（表格：事項｜負責方（我方/對方）｜期限，期限未提及則寫「未定」）、## 未決事項與下次追蹤。內容須忠於逐字稿，不要編造逐字稿中沒有的資訊；逐字稿破碎處可合理銜接語意但不可新增事實。只輸出會議紀錄本文。",
         "## Playbook\n" + ($("playbook").value.trim() || "（無）") + "\n\n## 完整逐字稿\n" + fullTranscript()
       );
       summaryMd = text;
