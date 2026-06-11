@@ -213,7 +213,7 @@
   }
   function scheduleTrans(){
     if(transTimer || transBusy || !transQueue.length) return;
-    transTimer = setTimeout(runTransBatch, 10000); // 每 10 秒批次翻一次，省請求數
+    transTimer = setTimeout(runTransBatch, 6000); // 每 6 秒批次翻一次
   }
   function attachZh(item, zh){
     item.seg.zh = zh;
@@ -447,25 +447,40 @@
   }
 
   function chunkASR(getTracks, who, voicedKey){
-    let active = false, mr = null;
-    function cycle(){
-      if(!active) return;
+    // 語音活動驅動：偵測到開口就開始錄，停頓 1.2 秒或滿 15 秒就切段送轉文字
+    const SILENCE_MS = 1200, MAX_MS = 15000;
+    let active = false, mr = null, watch = null, talking = false, lastVoice = 0, chunkStart = 0;
+    function beginChunk(){
       const tracks = getTracks();
-      if(!tracks || !tracks.length){ active = false; return; }
+      if(!tracks || !tracks.length) return;
+      const timeStr = now();
+      chunkStart = Date.now();
       mr = new MediaRecorder(new MediaStream(tracks), {mimeType:"audio/webm"});
-      const chunkStart = Date.now(), timeStr = now();
       mr.ondataavailable = ev=>{
-        // 該段期間有出聲才上傳，省成本
-        const voiced = activity.some(a => a.t >= chunkStart && a[voicedKey]);
-        if(voiced && ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who);
+        if(ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who);
       };
-      mr.onstop = ()=>{ if(active) cycle(); };
       mr.start();
-      setTimeout(()=>{ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} }, 15000);
+    }
+    function endChunk(){
+      if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; }
+    }
+    function tick(){
+      if(!active) return;
+      const a = activity[activity.length - 1];
+      const voiced = a ? a[voicedKey] : false;
+      const t = Date.now();
+      if(voiced) lastVoice = t;
+      if(!talking){
+        if(voiced){ talking = true; beginChunk(); }
+      } else {
+        if(t - lastVoice > SILENCE_MS || t - chunkStart > MAX_MS){
+          talking = false; endChunk();
+        }
+      }
     }
     return {
-      start(){ if(active) return; active = true; cycle(); },
-      stop(){ active = false; if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; } }
+      start(){ if(active) return; active = true; talking = false; lastVoice = 0; watch = setInterval(tick, 150); },
+      stop(){ active = false; if(watch){ clearInterval(watch); watch = null; } talking = false; endChunk(); }
     };
   }
   const tabASR = chunkASR(()=> tabStream ? tabStream.getAudioTracks() : null, "對方", "tab");
@@ -575,6 +590,9 @@
       try{ recognition.start(); }catch(_){}
     }
     recording = true;
+    if(tabStream && !headphone){
+      setStatus("提醒：耳機模式未開啟——對方逐字稿目前只靠麥克風收音（喇叭模式）。戴耳機請點「🎧 耳機模式」開啟，否則對方不會有逐字稿。");
+    }
     if(!startedAt) startedAt = new Date();
     $("recBtn").classList.remove("idle"); $("recBtn").classList.add("recording");
     $("recLabel").textContent = "停止錄音";
