@@ -119,6 +119,11 @@
     <label>Gemini Key（可取代左邊兩者）<br><input type="password" id="geminiKey" placeholder="AIza..."></label>
     <label>轉文字用<br><select id="asrProv"><option value="openai">OpenAI</option><option value="gemini" selected>Gemini</option></select></label>
     <label>顧問/摘要用<br><select id="llmProv"><option value="anthropic">Claude</option><option value="gemini" selected>Gemini</option></select></label>
+    <label>我方收音靈敏度<br><select id="micSens">
+      <option value="0.05">低（環境吵雜）</option>
+      <option value="0.03" selected>中（建議）</option>
+      <option value="0.015">高（講話小聲）</option>
+    </select></label>
     <label>Gemini 模型<br><select id="geminiModel">
       <option value="gemini-3.1-flash-lite" selected>3.1 Flash Lite（免費額度最高）</option>
       <option value="gemini-2.5-flash-lite">2.5 Flash Lite</option>
@@ -256,7 +261,8 @@
   let audioCtx = null, tabStream = null, micStream = null;
   let tabAnalyser = null, micAnalyser = null, vadTimer = null;
   const activity = []; // {t, tab, mic}，每 100ms 取樣，保留 90 秒
-  const TH = 0.018;    // 音量門檻（RMS）
+  const TH_TAB = 0.018;                                   // 會議音訊門檻（RMS）
+  const micTH = () => parseFloat($("micSens").value);     // 我方麥克風門檻（可調）
 
   function rms(analyser, buf){
     analyser.getByteTimeDomainData(buf);
@@ -270,8 +276,8 @@
     if(vadTimer) return;
     vadTimer = setInterval(()=>{
       if(!vadBuf) vadBuf = new Uint8Array(512);
-      const tab = tabAnalyser ? rms(tabAnalyser, vadBuf) > TH : false;
-      const mic = micAnalyser ? rms(micAnalyser, vadBuf) > TH : false;
+      const tab = tabAnalyser ? rms(tabAnalyser, vadBuf) > TH_TAB : false;
+      const mic = micAnalyser ? rms(micAnalyser, vadBuf) > micTH() : false;
       activity.push({t: Date.now(), tab, mic});
       const cutoff = Date.now() - 90000;
       while(activity.length && activity[0].t < cutoff) activity.shift();
@@ -411,7 +417,11 @@
     r.readAsDataURL(blob);
   });
 
-  async function transcribeChunk(blob, timeStr, who){
+  // 出聲不到 1 秒卻轉出 ≤3 字的超短句，多為模型幻覺（「對。」「好」「はい」…），直接捨棄
+  const looksHallucinated = (t, voicedMs) =>
+    (voicedMs || 0) < 1000 && t.replace(/[。．.,，!！?？、~～\s]/g, "").length <= 3;
+
+  async function transcribeChunk(blob, timeStr, who, voicedMs, attempt){
     const key = asrKey();
     if(!key) return;
     try{
@@ -429,7 +439,13 @@
           })
         });
         const d = await r.json();
-        if(d.error){ setStatus("Gemini 轉文字失敗：" + d.error.message); return; }
+        if(d.error){
+          if(/quota|rate/i.test(d.error.message) && !attempt){
+            setStatus("Gemini 轉文字限流，8 秒後自動重試此段…");
+            setTimeout(()=> transcribeChunk(blob, timeStr, who, voicedMs, 1), 8000);
+          } else setStatus("Gemini 轉文字失敗：" + d.error.message);
+          return;
+        }
         text = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
       } else {
         const fd = new FormData();
@@ -444,6 +460,7 @@
         if(d.error){ setStatus("OpenAI 轉文字失敗：" + d.error.message); return; }
         text = (d.text||"").trim();
       }
+      if(text && looksHallucinated(text, voicedMs)) return; // 疑似雜訊幻覺，不上稿
       if(text) addSegment(text, who, timeStr);
     }catch(err){ setStatus("API 轉文字連線失敗：" + err.message + "（公司網路可能阻擋，可換供應商或用手機熱點測試）"); }
   }
@@ -458,8 +475,9 @@
       mr = new MediaRecorder(new MediaStream(tracks), {mimeType:"audio/webm"});
       const chunkStart = Date.now(), timeStr = now();
       mr.ondataavailable = ev=>{
-        const voiced = activity.some(a => a.t >= chunkStart && a[voicedKey]);
-        if(voiced && ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who);
+        const frames = activity.filter(a => a.t >= chunkStart && a[voicedKey]).length; // 每格 100ms
+        const need = voicedKey === "mic" ? 5 : 3; // 我方須持續出聲 ≥0.5 秒，避免雜訊觸發
+        if(frames >= need && ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who, frames * 100);
       };
       mr.onstop = ()=>{ if(active) cycle(); };
       mr.start();
