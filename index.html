@@ -60,6 +60,7 @@
     border-radius:4px; padding:1px 4px; margin-right:5px; vertical-align:1px}
   #transBtn.on{background:#EDF6F3; border-color:var(--teal); color:var(--teal-dark); font-weight:600}
   .interim{color:var(--ink-2); font-style:italic; padding:6px 0; font-size:14px}
+  .seg.pending p{color:var(--ink-2); font-style:italic}
   .seg-del{flex:0 0 auto; border:none; background:none; color:var(--ink-2); font-size:14px;
     padding:2px 6px; margin-top:2px; opacity:0; transition:opacity .15s; cursor:pointer; border-radius:6px}
   .seg:hover .seg-del{opacity:1}
@@ -356,7 +357,7 @@
   }
   const whoClass = w => w === "我方" ? "me" : "them";
 
-  function addSegment(text, who, timeStr){
+  function addSegment(text, who, timeStr, atEl){
     text = text.trim(); if(!text) return;
     const seg = {time: timeStr || now(), text, who};
     segments.push(seg);
@@ -391,10 +392,29 @@
     div.appendChild(del);
     if(liveTrans && needsZh(text)) translateSeg(seg, wrap);
     const box = $("transcriptBox");
-    if(interimEl) box.insertBefore(div, interimEl); else box.appendChild(div);
+    if(atEl && atEl.parentNode) atEl.parentNode.insertBefore(div, atEl);
+    else if(interimEl) box.insertBefore(div, interimEl);
+    else box.appendChild(div);
     box.scrollTop = box.scrollHeight;
     $("summarizeBtn").disabled = false;
     $("exportBtn").disabled = false;
+  }
+
+  function addPending(who, timeStr){
+    const e = $("transcriptEmpty"); if(e) e.remove();
+    const div = document.createElement("div");
+    div.className = "seg pending";
+    const t = document.createElement("time"); t.textContent = timeStr; div.appendChild(t);
+    if(who){
+      const chip = document.createElement("span");
+      chip.className = "who " + whoClass(who); chip.textContent = who;
+      div.appendChild(chip);
+    }
+    const p = document.createElement("p"); p.textContent = "…轉文字中"; div.appendChild(p);
+    const box = $("transcriptBox");
+    if(interimEl) box.insertBefore(div, interimEl); else box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+    return div;
   }
 
   function showInterim(text){
@@ -421,9 +441,10 @@
   const looksHallucinated = (t, voicedMs) =>
     (voicedMs || 0) < 1000 && t.replace(/[。．.,，!！?？、~～\s]/g, "").length <= 3;
 
-  async function transcribeChunk(blob, timeStr, who, voicedMs, attempt){
+  async function transcribeChunk(blob, timeStr, who, voicedMs, attempt, pendEl){
     const key = asrKey();
-    if(!key) return;
+    const dropPend = ()=>{ if(pendEl && pendEl.parentNode) pendEl.remove(); };
+    if(!key){ dropPend(); return; }
     try{
       let text = "";
       if($("asrProv").value === "gemini"){
@@ -442,8 +463,8 @@
         if(d.error){
           if(/quota|rate/i.test(d.error.message) && !attempt){
             setStatus("Gemini 轉文字限流，8 秒後自動重試此段…");
-            setTimeout(()=> transcribeChunk(blob, timeStr, who, voicedMs, 1), 8000);
-          } else setStatus("Gemini 轉文字失敗：" + d.error.message);
+            setTimeout(()=> transcribeChunk(blob, timeStr, who, voicedMs, 1, pendEl), 8000);
+          } else { setStatus("Gemini 轉文字失敗：" + d.error.message); dropPend(); }
           return;
         }
         text = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
@@ -457,35 +478,57 @@
           method:"POST", headers:{ "Authorization":"Bearer " + key }, body: fd
         });
         const d = await r.json();
-        if(d.error){ setStatus("OpenAI 轉文字失敗：" + d.error.message); return; }
+        if(d.error){ setStatus("OpenAI 轉文字失敗：" + d.error.message); dropPend(); return; }
         text = (d.text||"").trim();
       }
-      if(text && looksHallucinated(text, voicedMs)) return; // 疑似雜訊幻覺，不上稿
-      if(text) addSegment(text, who, timeStr);
-    }catch(err){ setStatus("API 轉文字連線失敗：" + err.message + "（公司網路可能阻擋，可換供應商或用手機熱點測試）"); }
+      if(text && !looksHallucinated(text, voicedMs)) addSegment(text, who, timeStr, pendEl);
+      dropPend();
+    }catch(err){
+      dropPend();
+      setStatus("API 轉文字連線失敗：" + err.message + "（公司網路可能阻擋，可換供應商或用手機熱點測試）");
+    }
   }
-
   function chunkASR(getTracks, who, voicedKey){
-    // 固定 8 秒連續切塊：不間斷錄音，每 8 秒送一次轉文字（靜音段不上傳）
-    let active = false, mr = null;
-    function cycle(){
-      if(!active) return;
+    // 開口即錄；停頓 0.8 秒或滿 8 秒立即切段送出，句子講完馬上顯示
+    const SILENCE_MS = 800, MAX_MS = 8000;
+    let active = false, mr = null, watch = null, talking = false, lastVoice = 0, chunkStart = 0;
+    function beginChunk(){
       const tracks = getTracks();
-      if(!tracks || !tracks.length){ active = false; return; }
+      if(!tracks || !tracks.length) return;
+      const timeStr = now();
+      chunkStart = Date.now();
+      const startedAtMs = chunkStart;
       mr = new MediaRecorder(new MediaStream(tracks), {mimeType:"audio/webm"});
-      const chunkStart = Date.now(), timeStr = now();
       mr.ondataavailable = ev=>{
-        const frames = activity.filter(a => a.t >= chunkStart && a[voicedKey]).length; // 每格 100ms
-        const need = voicedKey === "mic" ? 5 : 3; // 我方須持續出聲 ≥0.5 秒，避免雜訊觸發
-        if(frames >= need && ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who, frames * 100);
+        const frames = activity.filter(a => a.t >= startedAtMs && a[voicedKey]).length; // 每格 100ms
+        const need = voicedKey === "mic" ? 5 : 3;
+        if(frames >= need && ev.data && ev.data.size > 2000){
+          const pend = addPending(who, timeStr);
+          transcribeChunk(ev.data, timeStr, who, frames * 100, 0, pend);
+        }
       };
-      mr.onstop = ()=>{ if(active) cycle(); };
       mr.start();
-      setTimeout(()=>{ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} }, 8000);
+    }
+    function endChunk(){
+      if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; }
+    }
+    function tick(){
+      if(!active) return;
+      const a = activity[activity.length - 1];
+      const voiced = a ? a[voicedKey] : false;
+      const t = Date.now();
+      if(voiced) lastVoice = t;
+      if(!talking){
+        if(voiced){ talking = true; beginChunk(); }
+      } else {
+        if(t - lastVoice > SILENCE_MS || t - chunkStart > MAX_MS){
+          talking = false; endChunk();
+        }
+      }
     }
     return {
-      start(){ if(active) return; active = true; cycle(); },
-      stop(){ active = false; if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; } }
+      start(){ if(active) return; active = true; talking = false; lastVoice = 0; watch = setInterval(tick, 150); },
+      stop(){ active = false; if(watch){ clearInterval(watch); watch = null; } talking = false; endChunk(); }
     };
   }
   const tabASR = chunkASR(()=> tabStream ? tabStream.getAudioTracks() : null, "對方", "tab");
