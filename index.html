@@ -205,55 +205,20 @@
     const latin = (t.match(/[A-Za-z]/g)||[]).length;
     return han < 2 && latin > 3;                                        // 幾乎沒中文且以英文為主
   }
-  const transQueue = [];
-  let transTimer = null, transBusy = false;
-  function queueTranslate(seg, container){
-    transQueue.push({seg, container});
-    scheduleTrans();
-  }
-  function scheduleTrans(){
-    if(transTimer || transBusy || !transQueue.length) return;
-    transTimer = setTimeout(runTransBatch, 6000); // 每 6 秒批次翻一次
-  }
-  function attachZh(item, zh){
-    item.seg.zh = zh;
-    const d = document.createElement("div");
-    d.className = "trans"; d.textContent = zh;
-    item.container.appendChild(d);
-  }
-  async function runTransBatch(){
-    transTimer = null;
-    if(!transQueue.length) return;
-    transBusy = true;
-    const batch = transQueue.splice(0, transQueue.length);
+  async function translateSeg(seg, container){
     try{
-      if(batch.length === 1){
-        const zh = await callClaude(
-          "你是會議即時翻譯。把這段會議發言翻成自然流暢的繁體中文，保留專有名詞原文。只輸出譯文。",
-          batch[0].seg.text, true
-        );
-        attachZh(batch[0], zh);
-      } else {
-        const numbered = batch.map((b,i)=> (i+1) + ". " + b.seg.text.replace(/\n/g," ")).join("\n");
-        const out = await callClaude(
-          "你是會議即時翻譯。以下是多段編號的會議發言，逐段翻成自然流暢的繁體中文，保留專有名詞原文。輸出格式：每行一段，以相同編號開頭（如「1. 譯文」），不要任何其他說明。",
-          numbered, true
-        );
-        const map = {};
-        out.split(/\n+/).forEach(l=>{
-          const m = l.match(/^(\d+)[\.、:：]\s*(.+)$/);
-          if(m) map[m[1]] = m[2].trim();
-        });
-        batch.forEach((b,i)=>{ if(map[i+1]) attachZh(b, map[i+1]); });
-      }
+      const zh = await callClaude(
+        "你是會議即時翻譯。把這段會議發言翻成自然流暢的繁體中文，保留專有名詞原文。只輸出譯文，不要任何說明。",
+        seg.text, true
+      );
+      seg.zh = zh;
+      const d = document.createElement("div");
+      d.className = "trans"; d.textContent = zh;
+      container.appendChild(d);
       const box = $("transcriptBox"); box.scrollTop = box.scrollHeight;
     }catch(err){
       const limited = /quota|rate|429/i.test(err.message);
-      setStatus(limited ? "即時翻譯被 Gemini 免費額度限流，稍後自動重試（可為 Gemini 綁定計費解除限制）" : "即時翻譯失敗：" + err.message);
-      if(limited) batch.forEach(b=> transQueue.push(b)); // 限流的段落留著下一批重試
-    }finally{
-      transBusy = false;
-      scheduleTrans();
+      setStatus(limited ? "即時翻譯被 Gemini 額度限流，此段未翻（可為 Gemini 綁定計費解除限制）" : "即時翻譯失敗：" + err.message);
     }
   }
   $("transBtn").addEventListener("click", ()=>{
@@ -382,7 +347,7 @@
     const wrap = document.createElement("div"); wrap.className = "body";
     const p = document.createElement("p"); p.textContent = text; wrap.appendChild(p);
     div.appendChild(wrap);
-    if(liveTrans && needsZh(text)) queueTranslate(seg, wrap);
+    if(liveTrans && needsZh(text)) translateSeg(seg, wrap);
     const box = $("transcriptBox");
     if(interimEl) box.insertBefore(div, interimEl); else box.appendChild(div);
     box.scrollTop = box.scrollHeight;
@@ -447,40 +412,25 @@
   }
 
   function chunkASR(getTracks, who, voicedKey){
-    // 語音活動驅動：偵測到開口就開始錄，停頓 1.2 秒或滿 15 秒就切段送轉文字
-    const SILENCE_MS = 1200, MAX_MS = 15000;
-    let active = false, mr = null, watch = null, talking = false, lastVoice = 0, chunkStart = 0;
-    function beginChunk(){
-      const tracks = getTracks();
-      if(!tracks || !tracks.length) return;
-      const timeStr = now();
-      chunkStart = Date.now();
-      mr = new MediaRecorder(new MediaStream(tracks), {mimeType:"audio/webm"});
-      mr.ondataavailable = ev=>{
-        if(ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who);
-      };
-      mr.start();
-    }
-    function endChunk(){
-      if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; }
-    }
-    function tick(){
+    // 固定 8 秒連續切塊：不間斷錄音，每 8 秒送一次轉文字（靜音段不上傳）
+    let active = false, mr = null;
+    function cycle(){
       if(!active) return;
-      const a = activity[activity.length - 1];
-      const voiced = a ? a[voicedKey] : false;
-      const t = Date.now();
-      if(voiced) lastVoice = t;
-      if(!talking){
-        if(voiced){ talking = true; beginChunk(); }
-      } else {
-        if(t - lastVoice > SILENCE_MS || t - chunkStart > MAX_MS){
-          talking = false; endChunk();
-        }
-      }
+      const tracks = getTracks();
+      if(!tracks || !tracks.length){ active = false; return; }
+      mr = new MediaRecorder(new MediaStream(tracks), {mimeType:"audio/webm"});
+      const chunkStart = Date.now(), timeStr = now();
+      mr.ondataavailable = ev=>{
+        const voiced = activity.some(a => a.t >= chunkStart && a[voicedKey]);
+        if(voiced && ev.data && ev.data.size > 2000) transcribeChunk(ev.data, timeStr, who);
+      };
+      mr.onstop = ()=>{ if(active) cycle(); };
+      mr.start();
+      setTimeout(()=>{ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} }, 8000);
     }
     return {
-      start(){ if(active) return; active = true; talking = false; lastVoice = 0; watch = setInterval(tick, 150); },
-      stop(){ active = false; if(watch){ clearInterval(watch); watch = null; } talking = false; endChunk(); }
+      start(){ if(active) return; active = true; cycle(); },
+      stop(){ active = false; if(mr){ try{ if(mr.state !== "inactive") mr.stop(); }catch(_){} mr = null; } }
     };
   }
   const tabASR = chunkASR(()=> tabStream ? tabStream.getAudioTracks() : null, "對方", "tab");
