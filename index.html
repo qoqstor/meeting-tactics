@@ -437,6 +437,22 @@
 
   const asrKey = () => ($("asrProv").value === "gemini" ? $("geminiKey") : $("openaiKey")).value.trim();
 
+  /* ---- Gemini 模型自動備援：限流時依序改用其他模型，冷卻後回到主模型 ---- */
+  const modelCooldown = {}; // model -> 冷卻到期時間戳
+  const FALLBACK_ORDER = ["gemini-3.1-flash-lite","gemini-2.5-flash-lite","gemini-2.5-flash","gemini-3-flash","gemini-3.5-flash"];
+  function parseRetrySecs(msg){
+    const m = (msg||"").match(/retry in (\d+(?:\.\d+)?)s/i);
+    return m ? Math.ceil(parseFloat(m[1])) + 1 : 60;
+  }
+  function coolModel(model, msg){ modelCooldown[model] = Date.now() + parseRetrySecs(msg) * 1000; }
+  function pickGeminiModel(){
+    const sel = $("geminiModel").value;
+    const order = [sel].concat(FALLBACK_ORDER.filter(m => m !== sel));
+    const t = Date.now();
+    for(const m of order){ if(!(modelCooldown[m] > t)) return m; }
+    return sel; // 全部冷卻中就硬用主模型
+  }
+
   const blobToBase64 = blob => new Promise((res, rej)=>{
     const r = new FileReader();
     r.onload = ()=> res(r.result.split(",")[1]);
@@ -456,7 +472,8 @@
       let text = "";
       if($("asrProv").value === "gemini"){
         const b64 = await blobToBase64(blob);
-        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + $("geminiModel").value + ":generateContent?key=" + encodeURIComponent(key), {
+        const gmodel = pickGeminiModel();
+        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(key), {
           method:"POST",
           headers:{ "Content-Type":"application/json" },
           body: JSON.stringify({
@@ -468,9 +485,12 @@
         });
         const d = await r.json();
         if(d.error){
-          if(/quota|rate/i.test(d.error.message) && !attempt){
-            setStatus("Gemini 轉文字限流，8 秒後自動重試此段…");
-            setTimeout(()=> transcribeChunk(blob, timeStr, who, voicedMs, 1, pendEl), 8000);
+          if(/quota|rate/i.test(d.error.message) && (attempt||0) < 2){
+            coolModel(gmodel, d.error.message);
+            const next = pickGeminiModel();
+            const wait = next !== gmodel ? 300 : 8000;
+            setStatus(gmodel.replace("gemini-","") + " 觸發上限" + (next !== gmodel ? "，自動改用 " + next.replace("gemini-","") + " 重試此段…" : "，8 秒後重試…"));
+            setTimeout(()=> transcribeChunk(blob, timeStr, who, voicedMs, (attempt||0) + 1, pendEl), wait);
           } else { setStatus("Gemini 轉文字失敗：" + d.error.message); dropPend(); }
           return;
         }
@@ -715,21 +735,33 @@
     if($("llmProv").value === "gemini"){
       const gkey = $("geminiKey").value.trim();
       if(!gkey) throw new Error("請先填入 Gemini API Key");
-      const gmodel = $("geminiModel").value;
-      const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(gkey), {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({
-          system_instruction:{ parts:[{ text: systemPrompt }] },
-          contents:[{ parts:[{ text: userPrompt }] }],
-          generationConfig:{ maxOutputTokens: 4096 }
-        })
-      });
-      const d = await r.json();
-      if(d.error) throw new Error(d.error.message || "Gemini API 錯誤");
-      const out = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
-      if(!out) throw new Error("Gemini 沒有回傳內容");
-      return out;
+      let lastErr = null;
+      for(let i = 0; i < 3; i++){
+        const gmodel = pickGeminiModel();
+        const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(gkey), {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({
+            system_instruction:{ parts:[{ text: systemPrompt }] },
+            contents:[{ parts:[{ text: userPrompt }] }],
+            generationConfig:{ maxOutputTokens: 4096 }
+          })
+        });
+        const d = await r.json();
+        if(d.error){
+          if(/quota|rate/i.test(d.error.message)){
+            coolModel(gmodel, d.error.message);
+            lastErr = new Error(gmodel.replace("gemini-","") + " 觸發上限");
+            const next = pickGeminiModel();
+            if(next !== gmodel){ setStatus(gmodel.replace("gemini-","") + " 觸發上限，自動改用 " + next.replace("gemini-","") + "…"); continue; }
+          }
+          throw new Error(d.error.message || "Gemini API 錯誤");
+        }
+        const out = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
+        if(!out) throw new Error("Gemini 沒有回傳內容");
+        return out;
+      }
+      throw (lastErr || new Error("Gemini 模型皆觸發上限，請稍後再試"));
     }
     const headers = { "Content-Type":"application/json" };
     const akey = $("anthropicKey").value.trim();
