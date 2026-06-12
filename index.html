@@ -86,6 +86,28 @@
     padding:5px 8px; width:230px}
   #hpBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
   #recModeBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
+  #shareBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
+  #joinBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
+  #chatPanel{position:fixed; right:16px; bottom:52px; width:300px; height:380px; z-index:50;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    box-shadow:0 8px 28px rgba(0,0,0,.14); display:flex; flex-direction:column; overflow:hidden}
+  .chat-head{display:flex; align-items:center; gap:6px; padding:8px 12px; font-size:13px; font-weight:700;
+    border-bottom:1px solid var(--line); background:#FBFAF6}
+  .chat-head .code{font:11px var(--mono); color:var(--teal); font-weight:400}
+  .chat-head button{border:none; background:none; margin-left:auto; cursor:pointer; font-size:14px; color:var(--ink-2); padding:2px 6px}
+  #chatLog{flex:1; overflow-y:auto; padding:10px 12px; display:flex; flex-direction:column; gap:6px}
+  .chat-msg{font-size:13px; line-height:1.5; word-break:break-word}
+  .chat-msg b{color:var(--teal-dark); font-weight:700; margin-right:5px}
+  .chat-msg .t{font:10px var(--mono); color:var(--ink-2); margin-right:5px}
+  .chat-msg.mine b{color:var(--amber)}
+  .chat-sys{font-size:11px; color:var(--ink-2); text-align:center; padding:2px 0}
+  .chat-emoji{display:flex; gap:2px; padding:4px 8px; border-top:1px solid var(--line)}
+  .chat-emoji button{border:none; background:none; font-size:17px; padding:3px 5px; cursor:pointer; border-radius:6px}
+  .chat-emoji button:hover{background:#F0EEE6}
+  .chat-input{display:flex; gap:6px; padding:8px; border-top:1px solid var(--line)}
+  .chat-input input{flex:1; font:13px inherit; border:1px solid var(--line); border-radius:8px; padding:6px 9px; outline:none}
+  .chat-input input:focus{border-color:var(--teal)}
+  .chat-input button{padding:6px 12px}
   footer{padding:8px 18px; border-top:1px solid var(--line); background:var(--panel);
     font-size:12px; color:var(--ink-2); display:flex; gap:14px; align-items:center; flex-wrap:wrap}
   .meter{display:inline-flex; align-items:center; gap:5px}
@@ -109,6 +131,9 @@
   <button id="tabBtn" title="擷取 Teams／Meet 的會議聲音，用於自動分辨我方／對方">🔗 連接會議音訊</button>
   <button id="transBtn" title="外語段落自動翻成繁體中文，顯示在原文下方">🈂 即時翻譯：關</button>
   <button id="recModeBtn" title="一鍵開啟完整會議記錄：我方與對方都走 API 高品質轉文字">📝 記錄模式：關</button>
+  <button id="shareBtn" title="產生驗證碼，讓其他人即時同步觀看逐字稿與翻譯（端對端加密）">📡 分享直播：關</button>
+  <button id="joinBtn" title="輸入驗證碼，同步觀看別人的會議逐字稿與翻譯（不耗 API）">👀 加入直播</button>
+  <button id="chatBtn" title="直播聊天室：文字與表情符號即時互動" style="display:none">💬 聊天</button>
   <div class="spacer"></div>
   <button id="recBtn" class="btn-rec idle"><span class="dot"></span><span id="recLabel">開始錄音</span></button>
   <button id="summarizeBtn" disabled>產生會議摘要</button>
@@ -188,6 +213,16 @@
   <span>逐字稿與摘要僅存於本頁，不上傳雲端 · 建議使用 Chrome / Edge</span>
 </footer>
 
+<div id="chatPanel" style="display:none">
+  <div class="chat-head">💬 直播聊天室 <span class="code" id="chatRoomCode"></span><button id="chatClose" title="收合">✕</button></div>
+  <div id="chatLog"></div>
+  <div class="chat-emoji" id="chatEmoji"></div>
+  <div class="chat-input">
+    <input id="chatText" placeholder="輸入訊息，Enter 送出" maxlength="300">
+    <button id="chatSend" class="btn-primary">送出</button>
+  </div>
+</div>
+
 <script>
 (function(){
   "use strict";
@@ -232,7 +267,11 @@
       seg.zh = zh;
       ph.classList.remove("pending");
       ph.textContent = zh;
-      makeEditable(ph, ()=> seg.zh, v=>{ seg.zh = v; });
+      makeEditable(ph, ()=> seg.zh, v=>{
+        seg.zh = v;
+        if(mqRole === "host") pub({type:"zh", id: seg.id, zh: v});
+      });
+      if(mqRole === "host") pub({type:"zh", id: seg.id, zh});
       const box = $("transcriptBox"); box.scrollTop = box.scrollHeight;
     }catch(err){
       if(ph && ph.parentNode) ph.remove();
@@ -250,6 +289,213 @@
       setStatus(keyOk ? "即時翻譯已開啟：外語段落會自動附上繁中譯文"
                       : "即時翻譯已開啟，但「顧問/摘要用」的 " + (prov === "gemini" ? "Gemini" : "Anthropic") + " Key 未填，本機開啟時翻譯會失敗");
     } else setStatus("即時翻譯已關閉");
+  });
+
+  /* ---------- 直播同步：公共 MQTT 通道 + 驗證碼端對端加密（觀看端零 API 消耗） ---------- */
+  const myId = Math.random().toString(36).slice(2);
+  let mq = null, mqRole = null, roomCode = "", roomKey = null, segSeq = 0;
+  const segById = {}; // id -> {seg, div, wrap, p, chip, zhEl}
+  const MQ_BROKER = "wss://broker.emqx.io:8084/mqtt";
+  const topicOf = c => "meeting-tactics/v1/" + c;
+
+  function genCode(){
+    const A = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let c = ""; for(let i = 0; i < 6; i++) c += A[Math.floor(Math.random() * A.length)];
+    return c;
+  }
+  function b64(buf){ const b = new Uint8Array(buf); let str = ""; for(let i = 0; i < b.length; i++) str += String.fromCharCode(b[i]); return btoa(str); }
+  function unb64(str){ const bin = atob(str); const b = new Uint8Array(bin.length); for(let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i); return b; }
+  async function deriveKey(code){
+    const enc = new TextEncoder();
+    const base = await crypto.subtle.importKey("raw", enc.encode(code), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey({name:"PBKDF2", salt: enc.encode("meeting-tactics-room"), iterations: 100000, hash:"SHA-256"},
+      base, {name:"AES-GCM", length:256}, false, ["encrypt","decrypt"]);
+  }
+  async function encMsg(obj){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({name:"AES-GCM", iv}, roomKey, new TextEncoder().encode(JSON.stringify(obj)));
+    const buf = new Uint8Array(12 + ct.byteLength); buf.set(iv, 0); buf.set(new Uint8Array(ct), 12);
+    return b64(buf);
+  }
+  async function decMsg(str){
+    const buf = unb64(str);
+    const pt = await crypto.subtle.decrypt({name:"AES-GCM", iv: buf.slice(0,12)}, roomKey, buf.slice(12));
+    return JSON.parse(new TextDecoder().decode(pt));
+  }
+  function loadMqtt(){
+    return new Promise((res, rej)=>{
+      if(window.mqtt) return res();
+      const sc = document.createElement("script");
+      sc.src = "https://unpkg.com/mqtt@5/dist/mqtt.min.js";
+      sc.onload = res;
+      sc.onerror = ()=> rej(new Error("無法載入同步元件（網路可能阻擋 unpkg.com）"));
+      document.head.appendChild(sc);
+    });
+  }
+  async function pub(obj){
+    if(!mq || !roomKey) return;
+    obj.from = myId;
+    try{ mq.publish(topicOf(roomCode), await encMsg(obj)); }catch(_){}
+  }
+  function snapshotSegs(){
+    return segments.map(x => ({id:x.id, time:x.time, who:x.who, text:x.text, zh:x.zh}));
+  }
+  function attachZhRemote(id, zh){
+    const r = segById[id]; if(!r) return;
+    r.seg.zh = zh;
+    if(r.zhEl){ r.zhEl.classList.remove("pending"); r.zhEl.textContent = zh; return; }
+    const d = document.createElement("div");
+    d.className = "trans"; d.textContent = zh;
+    r.wrap.appendChild(d); r.zhEl = d;
+    makeEditable(d, ()=> r.seg.zh, v=>{ r.seg.zh = v; });
+  }
+  function applyRemoteSeg(m){
+    if(segById[m.id]) return;
+    addSegment(m.text, m.who, m.time, null, m.id);
+    if(m.zh) attachZhRemote(m.id, m.zh);
+  }
+  async function onMqMessage(payloadStr){
+    let m;
+    try{ m = await decMsg(payloadStr); }catch(_){ return; } // 非本房間或解不開 → 忽略
+    if(!m || m.from === myId) return;
+    if(m.type === "chat"){ appendChat(m.name || "訪客", m.text || "", false, m.t); return; }
+    if(mqRole === "host"){
+      if(m.type === "hi"){
+        pub({type:"snapshot", segs: snapshotSegs()});
+        appendChatSys("有觀眾加入直播");
+      }
+      return;
+    }
+    switch(m.type){
+      case "bye":
+        appendChatSys("主持人已結束直播");
+        setStatus("主持人已結束直播，同步已停止（已收到的逐字稿仍可匯出）");
+        if(mq){ try{ mq.end(true); }catch(_){} mq = null; }
+        mqRole = null; roomKey = null;
+        $("joinBtn").classList.remove("on");
+        $("joinBtn").textContent = "👀 加入直播";
+        return;
+      case "rec":
+        appendChatSys(m.on ? "主持人開始錄音" : "主持人停止錄音");
+        setStatus(m.on ? "直播：主持人錄音中" : "直播：主持人已停止錄音");
+        return;
+      case "snapshot": (m.segs||[]).forEach(applyRemoteSeg); break;
+      case "seg": applyRemoteSeg(m); break;
+      case "zh": attachZhRemote(m.id, m.zh); break;
+      case "edit": { const r = segById[m.id]; if(r){ r.seg.text = m.text; r.p.textContent = m.text; } break; }
+      case "who": { const r = segById[m.id]; if(r && r.chip){ r.seg.who = m.who; r.chip.textContent = m.who; r.chip.className = "who " + whoClass(m.who); } break; }
+      case "del": { const r = segById[m.id]; if(r){ const i = segments.indexOf(r.seg); if(i > -1) segments.splice(i, 1); r.div.remove(); delete segById[m.id]; } break; }
+    }
+  }
+  function mqConnect(code, role, onReady){
+    roomCode = code;
+    mq = window.mqtt.connect(MQ_BROKER, {clientId: "mt_" + myId, clean: true, connectTimeout: 8000});
+    mq.on("connect", ()=>{ mqRole = role; mq.subscribe(topicOf(code)); onReady(); });
+    mq.on("message", (t, payload)=> onMqMessage(payload.toString()));
+    mq.on("error", ()=>{ setStatus("同步服務連線失敗（公司網路可能阻擋 wss），直播功能暫不可用"); stopShare(); });
+  }
+  /* ---- 直播聊天室 ---- */
+  let chatName = "";
+  function ensureChatName(){
+    if(chatName) return chatName;
+    chatName = (prompt("聊天室顯示名稱") || "").trim() || ("訪客" + myId.slice(0, 4).toUpperCase());
+    return chatName;
+  }
+  function appendChat(name, text, mine, timeStr){
+    const log = $("chatLog");
+    const d = document.createElement("div");
+    d.className = "chat-msg" + (mine ? " mine" : "");
+    const tm = document.createElement("span");
+    tm.className = "t"; tm.textContent = (timeStr || now()).slice(0, 5); // HH:MM
+    d.appendChild(tm);
+    const b = document.createElement("b"); b.textContent = name;
+    d.appendChild(b);
+    d.appendChild(document.createTextNode(text));
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+  function appendChatSys(text){
+    const log = $("chatLog");
+    const d = document.createElement("div");
+    d.className = "chat-sys"; d.textContent = "—— " + text + " ——";
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+  function sendChat(text){
+    text = (text || "").trim();
+    if(!text || !mqRole) return;
+    const name = ensureChatName();
+    const t = now();
+    pub({type:"chat", name, text, t});
+    appendChat(name, text, true, t);
+  }
+  function showChat(on){
+    $("chatBtn").style.display = on ? "" : "none";
+    $("chatPanel").style.display = on ? "flex" : "none";
+    if(on) $("chatRoomCode").textContent = roomCode;
+  }
+  ["👍","❤️","😂","🎉","👏","❓","🙏","💡"].forEach(em=>{
+    const b = document.createElement("button");
+    b.textContent = em;
+    b.addEventListener("click", ()=> sendChat(em));
+    $("chatEmoji").appendChild(b);
+  });
+  $("chatSend").addEventListener("click", ()=>{ sendChat($("chatText").value); $("chatText").value = ""; });
+  $("chatText").addEventListener("keydown", e=>{ if(e.key === "Enter"){ sendChat($("chatText").value); $("chatText").value = ""; } });
+  $("chatClose").addEventListener("click", ()=>{ $("chatPanel").style.display = "none"; });
+  $("chatBtn").addEventListener("click", ()=>{
+    if(!mqRole){ setStatus("請先開啟或加入直播，聊天室才會啟用"); return; }
+    const pnl = $("chatPanel");
+    pnl.style.display = pnl.style.display === "none" ? "flex" : "none";
+  });
+
+  function stopShare(){
+    if(mq){ try{ mq.end(true); }catch(_){} mq = null; }
+    mqRole = null; roomKey = null; roomCode = "";
+    $("shareBtn").classList.remove("on");
+    $("shareBtn").textContent = "📡 分享直播：關";
+    $("joinBtn").classList.remove("on");
+    $("joinBtn").textContent = "👀 加入直播";
+    showChat(false);
+    $("chatLog").innerHTML = "";
+  }
+  $("shareBtn").addEventListener("click", async ()=>{
+    if(mqRole === "host"){
+      await pub({type:"bye"});
+      setTimeout(()=>{ stopShare(); setStatus("直播已關閉（觀看端已收到通知）"); }, 300); // 留時間送出 bye
+      return;
+    }
+    if(mqRole === "viewer"){ setStatus("觀看模式中無法開直播，請先離開觀看"); return; }
+    try{
+      const code = genCode();
+      roomKey = await deriveKey(code);
+      await loadMqtt();
+      mqConnect(code, "host", ()=>{
+        $("shareBtn").classList.add("on");
+        $("shareBtn").textContent = "📡 直播中：" + code;
+        showChat(true);
+        appendChatSys("直播已開啟，驗證碼 " + code);
+        setStatus("直播已開啟，驗證碼【" + code + "】。其他人開同一個網頁按「👀 加入直播」輸入即可同步觀看（不耗他們的 API）");
+      });
+    }catch(err){ setStatus("直播開啟失敗：" + err.message); stopShare(); }
+  });
+  $("joinBtn").addEventListener("click", async ()=>{
+    if(mqRole === "viewer"){ stopShare(); setStatus("已離開觀看"); return; }
+    if(mqRole === "host"){ setStatus("直播主持中，無法同時觀看其他直播"); return; }
+    const code = (prompt("輸入直播驗證碼（6 碼）") || "").trim().toUpperCase();
+    if(!code) return;
+    try{
+      roomKey = await deriveKey(code);
+      await loadMqtt();
+      mqConnect(code, "viewer", ()=>{
+        $("joinBtn").classList.add("on");
+        $("joinBtn").textContent = "👀 觀看中（點擊離開）";
+        showChat(true);
+        appendChatSys("已加入直播 " + code);
+        setStatus("已加入直播【" + code + "】，逐字稿與翻譯將同步顯示（本端不消耗 API）");
+        pub({type:"hi"}); // 向主持端要目前為止的完整逐字稿
+      });
+    }catch(err){ setStatus("加入直播失敗：" + err.message); stopShare(); }
   });
 
   /* ---------- Playbook 上傳 ---------- */
@@ -359,16 +605,17 @@
   }
   const whoClass = w => w === "我方" ? "me" : "them";
 
-  function addSegment(text, who, timeStr, atEl){
+  function addSegment(text, who, timeStr, atEl, presetId){
     text = text.trim(); if(!text) return;
-    const seg = {time: timeStr || now(), text, who};
+    const seg = {id: presetId || (Date.now().toString(36) + "-" + (++segSeq)), time: timeStr || now(), text, who};
     segments.push(seg);
     const e = $("transcriptEmpty"); if(e) e.remove();
     const div = document.createElement("div");
     div.className = "seg";
     const t = document.createElement("time"); t.textContent = seg.time; div.appendChild(t);
+    let chip = null;
     if(who){
-      const chip = document.createElement("span");
+      chip = document.createElement("span");
       chip.className = "who " + whoClass(who);
       chip.textContent = who;
       chip.title = "點擊切換 我方／對方";
@@ -376,28 +623,37 @@
         seg.who = seg.who === "我方" ? "對方" : "我方";
         chip.textContent = seg.who;
         chip.className = "who " + whoClass(seg.who);
+        if(mqRole === "host") pub({type:"who", id: seg.id, who: seg.who});
       });
       div.appendChild(chip);
     }
     const wrap = document.createElement("div"); wrap.className = "body";
     const p = document.createElement("p"); p.textContent = text; wrap.appendChild(p);
     div.appendChild(wrap);
-    makeEditable(p, ()=> seg.text, v=>{ seg.text = v; });
+    makeEditable(p, ()=> seg.text, v=>{
+      seg.text = v;
+      if(mqRole === "host") pub({type:"edit", id: seg.id, text: v});
+    });
     const del = document.createElement("button");
     del.className = "seg-del"; del.textContent = "✕"; del.title = "刪除這句（誤偵測）";
     del.addEventListener("click", ()=>{
       const i = segments.indexOf(seg);
       if(i > -1) segments.splice(i, 1);
       div.remove();
+      delete segById[seg.id];
+      if(mqRole === "host") pub({type:"del", id: seg.id});
       if(!segments.length){ $("summarizeBtn").disabled = true; $("exportBtn").disabled = true; }
     });
     div.appendChild(del);
-    if(liveTrans && needsZh(text)){
+    segById[seg.id] = {seg, div, wrap, p, chip, zhEl: null};
+    if(liveTrans && needsZh(text) && !presetId){
       const ph = document.createElement("div");
       ph.className = "trans pending"; ph.textContent = "…翻譯中";
       wrap.appendChild(ph);
+      segById[seg.id].zhEl = ph;
       translateSeg(seg, ph);
     }
+    if(mqRole === "host" && !presetId) pub({type:"seg", id: seg.id, time: seg.time, who: seg.who, text: seg.text});
     const box = $("transcriptBox");
     if(atEl && atEl.parentNode) atEl.parentNode.insertBefore(div, atEl);
     else if(interimEl) box.insertBefore(div, interimEl);
@@ -708,6 +964,7 @@
       try{ recognition.start(); }catch(_){}
     }
     recording = true;
+    if(mqRole === "host") pub({type:"rec", on:true});
     if(tabStream && !headphone){
       setStatus("提醒：耳機模式未開啟——對方逐字稿目前只靠麥克風收音（喇叭模式）。戴耳機請點「🎧 耳機模式」開啟，否則對方不會有逐字稿。");
     }
@@ -719,6 +976,7 @@
   }
   function stopRec(){
     recording = false;
+    if(mqRole === "host") pub({type:"rec", on:false});
     stopTabASR();
     if(recognition){ try{ recognition.stop(); }catch(_){} recognition = null; }
     if(!tabStream && micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; micAnalyser = null; }
@@ -864,6 +1122,7 @@
     if(segments.length && !confirm("確定清空逐字稿與建議？此動作無法復原。")) return;
     stopRec();
     segments.length = 0; summaryMd = ""; startedAt = null;
+    for(const k in segById) delete segById[k];
     $("transcriptBox").innerHTML = '<div class="empty" id="transcriptEmpty">Microsoft Teams 使用步驟：<br>1. 按「🔗 連接會議音訊」→ 網頁版 Teams：選分頁並勾選「同時分享分頁音訊」；桌面版（Windows）：選「整個畫面」並勾選「分享系統音訊」<br>2. 用<b>喇叭</b>開會（不要戴耳機）<br>3. 按「開始錄音」，逐字稿自動標記 <b>我方／對方</b>（點標籤可切換）</div>';
     $("adviceBox").innerHTML = '<div class="empty">會議進行中，隨時按「⚡ 給我建議」。<br>AI 會根據 Playbook 與最近對話，<br>告訴你接下來可以怎麼接。</div>';
     $("summarizeBtn").disabled = true;
