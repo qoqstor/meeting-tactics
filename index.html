@@ -88,6 +88,7 @@
   #recModeBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #shareBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #liveTrBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
+  #vsBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   .live-row{padding:8px 0; font-size:14px; line-height:1.7; color:var(--ink-2); font-style:italic; border-bottom:1px dashed var(--line)}
   .live-row .zh{color:var(--teal-dark)}
   #joinBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
@@ -135,6 +136,7 @@
   <button id="transBtn" title="外語段落自動翻成繁體中文，顯示在原文下方">🈂 即時翻譯：關</button>
   <button id="liveTrBtn" title="Gemini 3.5 Live Translate：對方外語即時同傳成中文語音＋字幕（需 Gemini Key + 連接會議音訊）">🛰 Live 同傳：關</button>
   <button id="recModeBtn" title="一鍵開啟完整會議記錄：我方與對方都走 API 高品質轉文字">📝 記錄模式：關</button>
+  <button id="vsBtn" title="把 Live 同傳的中文語音同步播給直播觀看端（需同時開啟 Live 同傳與分享直播）">🔈 同傳語音直播：關</button>
   <button id="shareBtn" title="產生驗證碼，讓其他人即時同步觀看逐字稿與翻譯（端對端加密）">📡 分享直播：關</button>
   <button id="joinBtn" title="輸入驗證碼，同步觀看別人的會議逐字稿與翻譯（不耗 API）">👀 加入直播</button>
   <button id="chatBtn" title="直播聊天室：文字與表情符號即時互動" style="display:none">💬 聊天</button>
@@ -386,6 +388,7 @@
       case "snapshot": (m.segs||[]).forEach(applyRemoteSeg); break;
       case "seg": applyRemoteSeg(m); break;
       case "zh": attachZhRemote(m.id, m.zh); break;
+      case "pcm": playSharedPcm(m.d); break;
       case "edit": { const r = segById[m.id]; if(r){ r.seg.text = m.text; r.p.textContent = m.text; } break; }
       case "who": { const r = segById[m.id]; if(r && r.chip){ r.seg.who = m.who; r.chip.textContent = m.who; r.chip.className = "who " + whoClass(m.who); } break; }
       case "del": { const r = segById[m.id]; if(r){ const i = segments.indexOf(r.seg); if(i > -1) segments.splice(i, 1); r.div.remove(); delete segById[m.id]; } break; }
@@ -462,6 +465,10 @@
     $("joinBtn").textContent = "👀 加入直播";
     showChat(false);
     $("chatLog").innerHTML = "";
+    voiceShare = false; vsBuf = [];
+    if(vsTimer){ clearTimeout(vsTimer); vsTimer = null; }
+    $("vsBtn").classList.remove("on");
+    $("vsBtn").textContent = "🔈 同傳語音直播：關";
   }
   $("shareBtn").addEventListener("click", async ()=>{
     if(mqRole === "host"){
@@ -520,12 +527,70 @@
     for(let i = 0; i < n; i++) out[i] = f32[Math.floor(i * ratio)];
     return out;
   }
+  /* ---- 同傳語音直播：把翻譯語音推送給觀看端 ---- */
+  let voiceShare = false, vsBuf = [], vsTimer = null;
+  function vsQueue(f32_24k){
+    if(!voiceShare || mqRole !== "host") return;
+    const n = Math.floor(f32_24k.length / 1.5), out = new Float32Array(n); // 24k → 16k
+    for(let i = 0; i < n; i++) out[i] = f32_24k[Math.floor(i * 1.5)];
+    vsBuf.push(out);
+    if(!vsTimer) vsTimer = setTimeout(vsFlush, 500);
+  }
+  function vsFlush(){
+    vsTimer = null;
+    if(!vsBuf.length) return;
+    let len = 0; vsBuf.forEach(b => len += b.length);
+    const all = new Float32Array(len); let o = 0;
+    vsBuf.forEach(b => { all.set(b, o); o += b.length; });
+    vsBuf = [];
+    pub({type:"pcm", d: f32ToPcm16b64(all)});
+  }
+  let shPlayT = 0;
+  function playSharedPcm(d){
+    try{
+      audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+      if(audioCtx.state === "suspended"){
+        audioCtx.resume();
+        if(!window.__vsHint){ window.__vsHint = true;
+          setStatus("收到同傳語音：若沒聽到聲音，請點擊頁面任意處啟用播放");
+          document.addEventListener("click", ()=> audioCtx.resume(), {once:true});
+        }
+      }
+      const bytes = unb64(d);
+      const i16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 2));
+      const f32 = new Float32Array(i16.length);
+      for(let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+      const buf = audioCtx.createBuffer(1, f32.length, 16000);
+      buf.getChannelData(0).set(f32);
+      const node = audioCtx.createBufferSource();
+      node.buffer = buf; node.connect(audioCtx.destination);
+      const t = Math.max(audioCtx.currentTime + 0.05, shPlayT);
+      node.start(t); shPlayT = t + buf.duration;
+    }catch(_){}
+  }
+  $("vsBtn").addEventListener("click", ()=>{
+    if(!voiceShare){
+      if(!liveOn){ setStatus("請先開啟「🛰 Live 同傳」，才有翻譯語音可分享"); return; }
+      if(mqRole !== "host"){ setStatus("請先開啟「📡 分享直播」，觀看端才收得到語音"); return; }
+      voiceShare = true;
+      $("vsBtn").classList.add("on");
+      $("vsBtn").textContent = "🔈 同傳語音直播：開";
+      setStatus("同傳語音直播已開啟：觀看端將同步聽到中文翻譯語音（延遲約 1–2 秒）");
+    } else {
+      voiceShare = false;
+      $("vsBtn").classList.remove("on");
+      $("vsBtn").textContent = "🔈 同傳語音直播：關";
+      setStatus("同傳語音直播已關閉（字幕同步不受影響）");
+    }
+  });
+
   function playPcm24(b64data){
     try{
       const bytes = unb64(b64data);
       const i16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 2));
       const f32 = new Float32Array(i16.length);
       for(let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+      vsQueue(f32);
       const buf = audioCtx.createBuffer(1, f32.length, 24000);
       buf.getChannelData(0).set(f32);
       const node = audioCtx.createBufferSource();
@@ -644,6 +709,11 @@
     if(!silent){
       $("liveTrBtn").classList.remove("on");
       $("liveTrBtn").textContent = "🛰 Live 同傳：關";
+      if(voiceShare){
+        voiceShare = false;
+        $("vsBtn").classList.remove("on");
+        $("vsBtn").textContent = "🔈 同傳語音直播：關";
+      }
     }
   }
   $("liveTrBtn").addEventListener("click", ()=> liveOn ? (stopLiveTr(), setStatus("Live 同傳已關閉")) : startLiveTr());
