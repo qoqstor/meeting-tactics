@@ -87,6 +87,9 @@
   #hpBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
   #recModeBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #shareBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
+  #liveTrBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
+  .live-row{padding:8px 0; font-size:14px; line-height:1.7; color:var(--ink-2); font-style:italic; border-bottom:1px dashed var(--line)}
+  .live-row .zh{color:var(--teal-dark)}
   #joinBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
   #chatPanel{position:fixed; right:16px; bottom:52px; width:300px; height:380px; z-index:50;
     background:var(--panel); border:1px solid var(--line); border-radius:12px;
@@ -130,6 +133,7 @@
   </select>
   <button id="tabBtn" title="擷取 Teams／Meet 的會議聲音，用於自動分辨我方／對方">🔗 連接會議音訊</button>
   <button id="transBtn" title="外語段落自動翻成繁體中文，顯示在原文下方">🈂 即時翻譯：關</button>
+  <button id="liveTrBtn" title="Gemini 3.5 Live Translate：對方外語即時同傳成中文語音＋字幕（需 Gemini Key + 連接會議音訊）">🛰 Live 同傳：關</button>
   <button id="recModeBtn" title="一鍵開啟完整會議記錄：我方與對方都走 API 高品質轉文字">📝 記錄模式：關</button>
   <button id="shareBtn" title="產生驗證碼，讓其他人即時同步觀看逐字稿與翻譯（端對端加密）">📡 分享直播：關</button>
   <button id="joinBtn" title="輸入驗證碼，同步觀看別人的會議逐字稿與翻譯（不耗 API）">👀 加入直播</button>
@@ -498,6 +502,134 @@
     }catch(err){ setStatus("加入直播失敗：" + err.message); stopShare(); }
   });
 
+  /* ---------- 🛰 Live 同傳：Gemini 3.5 Live Translate（語音進→中文語音+字幕出） ---------- */
+  let liveWS = null, liveOn = false, liveSrcNode = null, liveProcNode = null, livePlayT = 0;
+  let liveInBuf = "", liveOutBuf = "", liveFlushTimer = null, liveRow = null, liveStartTime = "";
+
+  function f32ToPcm16b64(f32){
+    const i16 = new Int16Array(f32.length);
+    for(let i = 0; i < f32.length; i++){
+      const v = Math.max(-1, Math.min(1, f32[i]));
+      i16[i] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+    }
+    return b64(i16.buffer);
+  }
+  function downsampleTo16k(f32, fromRate){
+    const ratio = fromRate / 16000, n = Math.floor(f32.length / ratio), out = new Float32Array(n);
+    for(let i = 0; i < n; i++) out[i] = f32[Math.floor(i * ratio)];
+    return out;
+  }
+  function playPcm24(b64data){
+    try{
+      const bytes = unb64(b64data);
+      const i16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 2));
+      const f32 = new Float32Array(i16.length);
+      for(let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+      const buf = audioCtx.createBuffer(1, f32.length, 24000);
+      buf.getChannelData(0).set(f32);
+      const node = audioCtx.createBufferSource();
+      node.buffer = buf; node.connect(audioCtx.destination);
+      const t = Math.max(audioCtx.currentTime, livePlayT);
+      node.start(t); livePlayT = t + buf.duration;
+    }catch(_){}
+  }
+  function liveUpdateRow(){
+    if(!liveRow){
+      liveRow = document.createElement("div");
+      liveRow.className = "live-row";
+      const box = $("transcriptBox");
+      const e = $("transcriptEmpty"); if(e) e.remove();
+      box.appendChild(liveRow);
+      liveStartTime = now();
+    }
+    liveRow.innerHTML = "";
+    liveRow.appendChild(document.createTextNode("🛰 同傳中｜" + liveInBuf));
+    if(liveOutBuf){
+      const z = document.createElement("div"); z.className = "zh"; z.textContent = "⤷ " + liveOutBuf;
+      liveRow.appendChild(z);
+    }
+    const box = $("transcriptBox"); box.scrollTop = box.scrollHeight;
+  }
+  function liveTouch(){
+    liveUpdateRow();
+    if(liveFlushTimer) clearTimeout(liveFlushTimer);
+    liveFlushTimer = setTimeout(liveFlush, 2000); // 停頓 2 秒落稿成正式段落
+  }
+  function liveFlush(){
+    liveFlushTimer = null;
+    const orig = liveInBuf.trim(), zh = liveOutBuf.trim();
+    liveInBuf = ""; liveOutBuf = "";
+    if(liveRow){ liveRow.remove(); liveRow = null; }
+    if(!orig) return;
+    const seg = addSegment(orig, "對方", liveStartTime, null, null, true); // 不再走文字翻譯（同傳已給譯文）
+    if(seg && zh){
+      attachZhRemote(seg.id, zh);
+      if(mqRole === "host") pub({type:"zh", id: seg.id, zh});
+    }
+  }
+  function startLiveTr(){
+    const gkey = $("geminiKey").value.trim();
+    if(!gkey){ setStatus("Live 同傳需要填入 Gemini API Key"); return; }
+    if(!tabStream){ setStatus("Live 同傳需要先按「🔗 連接會議音訊」"); return; }
+    audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state === "suspended") audioCtx.resume();
+    tabASR.stop(); // 避免與切塊轉文字重複出稿
+    liveWS = new WebSocket("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + encodeURIComponent(gkey));
+    liveWS.onopen = ()=>{
+      liveWS.send(JSON.stringify({ setup:{
+        model: "models/gemini-3.5-live-translate-preview",
+        generationConfig:{
+          responseModalities: ["AUDIO"],
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          translationConfig: { targetLanguageCode: "zh-Hant", echoTargetLanguage: false }
+        }
+      }}));
+      liveSrcNode = audioCtx.createMediaStreamSource(new MediaStream(tabStream.getAudioTracks()));
+      liveProcNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      liveProcNode.onaudioprocess = e=>{
+        if(liveWS && liveWS.readyState === 1){
+          const f = downsampleTo16k(e.inputBuffer.getChannelData(0), audioCtx.sampleRate);
+          liveWS.send(JSON.stringify({ realtimeInput:{ audio:{ data: f32ToPcm16b64(f), mimeType: "audio/pcm;rate=16000" } } }));
+        }
+        e.outputBuffer.getChannelData(0).fill(0);
+      };
+      liveSrcNode.connect(liveProcNode);
+      liveProcNode.connect(audioCtx.destination);
+      liveOn = true; livePlayT = 0;
+      $("liveTrBtn").classList.add("on");
+      $("liveTrBtn").textContent = "🛰 Live 同傳：開";
+      setStatus("Live 同傳已啟動：對方外語 → 中文語音（耳機播放）＋字幕落稿；中文發言自動略過");
+    };
+    liveWS.onmessage = async ev=>{
+      let raw = ev.data;
+      if(raw instanceof Blob) raw = await raw.text();
+      let msg; try{ msg = JSON.parse(raw); }catch(_){ return; }
+      const sc = msg.serverContent;
+      if(!sc) return;
+      if(sc.inputTranscription && sc.inputTranscription.text){ liveInBuf += sc.inputTranscription.text; liveTouch(); }
+      if(sc.outputTranscription && sc.outputTranscription.text){ liveOutBuf += sc.outputTranscription.text; liveTouch(); }
+      if(sc.modelTurn && sc.modelTurn.parts){
+        for(const part of sc.modelTurn.parts){
+          if(part.inlineData && part.inlineData.data) playPcm24(part.inlineData.data);
+        }
+      }
+    };
+    liveWS.onerror = ()=>{ setStatus("Live 同傳連線錯誤（網路阻擋 wss 或 Key 無此模型權限）"); stopLiveTr(); };
+    liveWS.onclose = ev=>{ if(liveOn){ setStatus("Live 同傳連線中斷" + (ev.reason ? "：" + ev.reason : "")); stopLiveTr(); } };
+  }
+  function stopLiveTr(){
+    liveOn = false;
+    if(liveFlushTimer){ clearTimeout(liveFlushTimer); liveFlushTimer = null; }
+    liveFlush();
+    if(liveProcNode){ try{ liveProcNode.disconnect(); }catch(_){} liveProcNode = null; }
+    if(liveSrcNode){ try{ liveSrcNode.disconnect(); }catch(_){} liveSrcNode = null; }
+    if(liveWS){ try{ liveWS.close(); }catch(_){} liveWS = null; }
+    $("liveTrBtn").classList.remove("on");
+    $("liveTrBtn").textContent = "🛰 Live 同傳：關";
+  }
+  $("liveTrBtn").addEventListener("click", ()=> liveOn ? (stopLiveTr(), setStatus("Live 同傳已關閉")) : startLiveTr());
+
   /* ---------- Playbook 上傳 ---------- */
   $("loadFileBtn").addEventListener("click", ()=> $("fileInput").click());
   $("fileInput").addEventListener("change", e=>{
@@ -564,6 +696,7 @@
     setStatus("講者偵測已啟用：會議聲音 → 對方、麥克風 → 我方");
   }
   function disconnectTab(){
+    if(liveOn) stopLiveTr();
     stopTabASR();
     stopVAD();
     if(tabStream){ tabStream.getTracks().forEach(t=>t.stop()); tabStream = null; }
@@ -605,7 +738,7 @@
   }
   const whoClass = w => w === "我方" ? "me" : "them";
 
-  function addSegment(text, who, timeStr, atEl, presetId){
+  function addSegment(text, who, timeStr, atEl, presetId, skipTrans){
     text = text.trim(); if(!text) return;
     const seg = {id: presetId || (Date.now().toString(36) + "-" + (++segSeq)), time: timeStr || now(), text, who};
     segments.push(seg);
@@ -646,7 +779,7 @@
     });
     div.appendChild(del);
     segById[seg.id] = {seg, div, wrap, p, chip, zhEl: null};
-    if(liveTrans && needsZh(text) && !presetId){
+    if(liveTrans && needsZh(text) && !presetId && !skipTrans){
       const ph = document.createElement("div");
       ph.className = "trans pending"; ph.textContent = "…翻譯中";
       wrap.appendChild(ph);
@@ -661,6 +794,7 @@
     box.scrollTop = box.scrollHeight;
     $("summarizeBtn").disabled = false;
     $("exportBtn").disabled = false;
+    return seg;
   }
 
   function addPending(who, timeStr){
@@ -817,6 +951,7 @@
   const micASR = chunkASR(()=> micStream ? micStream.getAudioTracks() : null, "我方", "mic");
 
   function startTabASR(){
+    if(liveOn) return; // Live 同傳已涵蓋對方聲道，避免重複出稿
     if(!tabStream){ setStatus("耳機模式需要先按「🔗 連接會議音訊」"); return; }
     if(!asrKey()){ setStatus("耳機模式需要填入 " + ($("asrProv").value === "gemini" ? "Gemini" : "OpenAI") + " API Key，才能轉出對方的話"); return; }
     tabASR.start();
