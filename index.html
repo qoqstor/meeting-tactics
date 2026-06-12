@@ -98,6 +98,7 @@
   #chatLog{flex:1; overflow-y:auto; padding:10px 12px; display:flex; flex-direction:column; gap:6px}
   .chat-msg{font-size:13px; line-height:1.5; word-break:break-word}
   .chat-msg b{color:var(--teal-dark); font-weight:700; margin-right:5px}
+  .chat-msg .t{font:10px var(--mono); color:var(--ink-2); margin-right:5px}
   .chat-msg.mine b{color:var(--amber)}
   .chat-sys{font-size:11px; color:var(--ink-2); text-align:center; padding:2px 0}
   .chat-emoji{display:flex; gap:2px; padding:4px 8px; border-top:1px solid var(--line)}
@@ -357,7 +358,7 @@
     let m;
     try{ m = await decMsg(payloadStr); }catch(_){ return; } // 非本房間或解不開 → 忽略
     if(!m || m.from === myId) return;
-    if(m.type === "chat"){ appendChat(m.name || "訪客", m.text || ""); return; }
+    if(m.type === "chat"){ appendChat(m.name || "訪客", m.text || "", false, m.t); return; }
     if(mqRole === "host"){
       if(m.type === "hi"){
         pub({type:"snapshot", segs: snapshotSegs()});
@@ -400,10 +401,13 @@
     chatName = (prompt("聊天室顯示名稱") || "").trim() || ("訪客" + myId.slice(0, 4).toUpperCase());
     return chatName;
   }
-  function appendChat(name, text, mine){
+  function appendChat(name, text, mine, timeStr){
     const log = $("chatLog");
     const d = document.createElement("div");
     d.className = "chat-msg" + (mine ? " mine" : "");
+    const tm = document.createElement("span");
+    tm.className = "t"; tm.textContent = (timeStr || now()).slice(0, 5); // HH:MM
+    d.appendChild(tm);
     const b = document.createElement("b"); b.textContent = name;
     d.appendChild(b);
     d.appendChild(document.createTextNode(text));
@@ -421,8 +425,9 @@
     text = (text || "").trim();
     if(!text || !mqRole) return;
     const name = ensureChatName();
-    pub({type:"chat", name, text});
-    appendChat(name, text, true);
+    const t = now();
+    pub({type:"chat", name, text, t});
+    appendChat(name, text, true, t);
   }
   function showChat(on){
     $("chatBtn").style.display = on ? "" : "none";
