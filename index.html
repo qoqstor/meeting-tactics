@@ -504,6 +504,7 @@
 
   /* ---------- 🛰 Live 同傳：Gemini 3.5 Live Translate（語音進→中文語音+字幕出） ---------- */
   let liveWS = null, liveOn = false, liveSrcNode = null, liveProcNode = null, livePlayT = 0;
+  let liveSetupVariant = 0, liveGotData = false;
   let liveInBuf = "", liveOutBuf = "", liveFlushTimer = null, liveRow = null, liveStartTime = "";
 
   function f32ToPcm16b64(f32){
@@ -574,17 +575,21 @@
     audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
     if(audioCtx.state === "suspended") audioCtx.resume();
     tabASR.stop(); // 避免與切塊轉文字重複出稿
+    liveGotData = false;
     liveWS = new WebSocket("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + encodeURIComponent(gkey));
     liveWS.onopen = ()=>{
-      liveWS.send(JSON.stringify({ setup:{
+      // 變體 0：逐字稿設定在 setup 頂層、translationConfig 在 generationConfig（協定標準位置優先）
+      // 變體 1：translationConfig 也移到 setup 頂層（若伺服器拒絕變體 0 自動改用）
+      const tc = { targetLanguageCode: "zh-Hant", echoTargetLanguage: false };
+      const setup = {
         model: "models/gemini-3.5-live-translate-preview",
-        generationConfig:{
-          responseModalities: ["AUDIO"],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          translationConfig: { targetLanguageCode: "zh-Hant", echoTargetLanguage: false }
-        }
-      }}));
+        generationConfig: { responseModalities: ["AUDIO"] },
+        inputAudioTranscription: {},
+        outputAudioTranscription: {}
+      };
+      if(liveSetupVariant === 0) setup.generationConfig.translationConfig = tc;
+      else setup.translationConfig = tc;
+      liveWS.send(JSON.stringify({ setup }));
       liveSrcNode = audioCtx.createMediaStreamSource(new MediaStream(tabStream.getAudioTracks()));
       liveProcNode = audioCtx.createScriptProcessor(4096, 1, 1);
       liveProcNode.onaudioprocess = e=>{
@@ -605,6 +610,7 @@
       let raw = ev.data;
       if(raw instanceof Blob) raw = await raw.text();
       let msg; try{ msg = JSON.parse(raw); }catch(_){ return; }
+      liveGotData = true;
       const sc = msg.serverContent;
       if(!sc) return;
       if(sc.inputTranscription && sc.inputTranscription.text){ liveInBuf += sc.inputTranscription.text; liveTouch(); }
@@ -615,18 +621,30 @@
         }
       }
     };
-    liveWS.onerror = ()=>{ setStatus("Live 同傳連線錯誤（網路阻擋 wss 或 Key 無此模型權限）"); stopLiveTr(); };
-    liveWS.onclose = ev=>{ if(liveOn){ setStatus("Live 同傳連線中斷" + (ev.reason ? "：" + ev.reason : "")); stopLiveTr(); } };
+    liveWS.onerror = ()=>{ if(!liveGotData && liveSetupVariant < 1) return; setStatus("Live 同傳連線錯誤（網路阻擋 wss 或 Key 無此模型權限）"); stopLiveTr(); };
+    liveWS.onclose = ev=>{
+      const fieldErr = /Cannot find field|Unknown name|Invalid JSON/i.test(ev.reason || "");
+      if(!liveGotData && fieldErr && liveSetupVariant < 1){
+        liveSetupVariant++;
+        setStatus("Live 同傳：伺服器拒絕設定格式，自動調整參數重連中…");
+        stopLiveTr(true);
+        setTimeout(startLiveTr, 400);
+        return;
+      }
+      if(liveOn){ setStatus("Live 同傳連線中斷" + (ev.reason ? "：" + ev.reason : "")); stopLiveTr(); }
+    };
   }
-  function stopLiveTr(){
+  function stopLiveTr(silent){
     liveOn = false;
     if(liveFlushTimer){ clearTimeout(liveFlushTimer); liveFlushTimer = null; }
     liveFlush();
     if(liveProcNode){ try{ liveProcNode.disconnect(); }catch(_){} liveProcNode = null; }
     if(liveSrcNode){ try{ liveSrcNode.disconnect(); }catch(_){} liveSrcNode = null; }
-    if(liveWS){ try{ liveWS.close(); }catch(_){} liveWS = null; }
-    $("liveTrBtn").classList.remove("on");
-    $("liveTrBtn").textContent = "🛰 Live 同傳：關";
+    if(liveWS){ const w = liveWS; liveWS = null; w.onclose = null; try{ w.close(); }catch(_){} }
+    if(!silent){
+      $("liveTrBtn").classList.remove("on");
+      $("liveTrBtn").textContent = "🛰 Live 同傳：關";
+    }
   }
   $("liveTrBtn").addEventListener("click", ()=> liveOn ? (stopLiveTr(), setStatus("Live 同傳已關閉")) : startLiveTr());
 
