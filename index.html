@@ -88,6 +88,25 @@
   #recModeBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #shareBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #joinBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
+  #chatPanel{position:fixed; right:16px; bottom:52px; width:300px; height:380px; z-index:50;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    box-shadow:0 8px 28px rgba(0,0,0,.14); display:flex; flex-direction:column; overflow:hidden}
+  .chat-head{display:flex; align-items:center; gap:6px; padding:8px 12px; font-size:13px; font-weight:700;
+    border-bottom:1px solid var(--line); background:#FBFAF6}
+  .chat-head .code{font:11px var(--mono); color:var(--teal); font-weight:400}
+  .chat-head button{border:none; background:none; margin-left:auto; cursor:pointer; font-size:14px; color:var(--ink-2); padding:2px 6px}
+  #chatLog{flex:1; overflow-y:auto; padding:10px 12px; display:flex; flex-direction:column; gap:6px}
+  .chat-msg{font-size:13px; line-height:1.5; word-break:break-word}
+  .chat-msg b{color:var(--teal-dark); font-weight:700; margin-right:5px}
+  .chat-msg.mine b{color:var(--amber)}
+  .chat-sys{font-size:11px; color:var(--ink-2); text-align:center; padding:2px 0}
+  .chat-emoji{display:flex; gap:2px; padding:4px 8px; border-top:1px solid var(--line)}
+  .chat-emoji button{border:none; background:none; font-size:17px; padding:3px 5px; cursor:pointer; border-radius:6px}
+  .chat-emoji button:hover{background:#F0EEE6}
+  .chat-input{display:flex; gap:6px; padding:8px; border-top:1px solid var(--line)}
+  .chat-input input{flex:1; font:13px inherit; border:1px solid var(--line); border-radius:8px; padding:6px 9px; outline:none}
+  .chat-input input:focus{border-color:var(--teal)}
+  .chat-input button{padding:6px 12px}
   footer{padding:8px 18px; border-top:1px solid var(--line); background:var(--panel);
     font-size:12px; color:var(--ink-2); display:flex; gap:14px; align-items:center; flex-wrap:wrap}
   .meter{display:inline-flex; align-items:center; gap:5px}
@@ -113,6 +132,7 @@
   <button id="recModeBtn" title="一鍵開啟完整會議記錄：我方與對方都走 API 高品質轉文字">📝 記錄模式：關</button>
   <button id="shareBtn" title="產生驗證碼，讓其他人即時同步觀看逐字稿與翻譯（端對端加密）">📡 分享直播：關</button>
   <button id="joinBtn" title="輸入驗證碼，同步觀看別人的會議逐字稿與翻譯（不耗 API）">👀 加入直播</button>
+  <button id="chatBtn" title="直播聊天室：文字與表情符號即時互動" style="display:none">💬 聊天</button>
   <div class="spacer"></div>
   <button id="recBtn" class="btn-rec idle"><span class="dot"></span><span id="recLabel">開始錄音</span></button>
   <button id="summarizeBtn" disabled>產生會議摘要</button>
@@ -191,6 +211,16 @@
   <div class="spacer"></div>
   <span>逐字稿與摘要僅存於本頁，不上傳雲端 · 建議使用 Chrome / Edge</span>
 </footer>
+
+<div id="chatPanel" style="display:none">
+  <div class="chat-head">💬 直播聊天室 <span class="code" id="chatRoomCode"></span><button id="chatClose" title="收合">✕</button></div>
+  <div id="chatLog"></div>
+  <div class="chat-emoji" id="chatEmoji"></div>
+  <div class="chat-input">
+    <input id="chatText" placeholder="輸入訊息，Enter 送出" maxlength="300">
+    <button id="chatSend" class="btn-primary">送出</button>
+  </div>
+</div>
 
 <script>
 (function(){
@@ -327,11 +357,27 @@
     let m;
     try{ m = await decMsg(payloadStr); }catch(_){ return; } // 非本房間或解不開 → 忽略
     if(!m || m.from === myId) return;
+    if(m.type === "chat"){ appendChat(m.name || "訪客", m.text || ""); return; }
     if(mqRole === "host"){
-      if(m.type === "hi") pub({type:"snapshot", segs: snapshotSegs()});
+      if(m.type === "hi"){
+        pub({type:"snapshot", segs: snapshotSegs()});
+        appendChatSys("有觀眾加入直播");
+      }
       return;
     }
     switch(m.type){
+      case "bye":
+        appendChatSys("主持人已結束直播");
+        setStatus("主持人已結束直播，同步已停止（已收到的逐字稿仍可匯出）");
+        if(mq){ try{ mq.end(true); }catch(_){} mq = null; }
+        mqRole = null; roomKey = null;
+        $("joinBtn").classList.remove("on");
+        $("joinBtn").textContent = "👀 加入直播";
+        return;
+      case "rec":
+        appendChatSys(m.on ? "主持人開始錄音" : "主持人停止錄音");
+        setStatus(m.on ? "直播：主持人錄音中" : "直播：主持人已停止錄音");
+        return;
       case "snapshot": (m.segs||[]).forEach(applyRemoteSeg); break;
       case "seg": applyRemoteSeg(m); break;
       case "zh": attachZhRemote(m.id, m.zh); break;
@@ -347,6 +393,57 @@
     mq.on("message", (t, payload)=> onMqMessage(payload.toString()));
     mq.on("error", ()=>{ setStatus("同步服務連線失敗（公司網路可能阻擋 wss），直播功能暫不可用"); stopShare(); });
   }
+  /* ---- 直播聊天室 ---- */
+  let chatName = "";
+  function ensureChatName(){
+    if(chatName) return chatName;
+    chatName = (prompt("聊天室顯示名稱") || "").trim() || ("訪客" + myId.slice(0, 4).toUpperCase());
+    return chatName;
+  }
+  function appendChat(name, text, mine){
+    const log = $("chatLog");
+    const d = document.createElement("div");
+    d.className = "chat-msg" + (mine ? " mine" : "");
+    const b = document.createElement("b"); b.textContent = name;
+    d.appendChild(b);
+    d.appendChild(document.createTextNode(text));
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+  function appendChatSys(text){
+    const log = $("chatLog");
+    const d = document.createElement("div");
+    d.className = "chat-sys"; d.textContent = "—— " + text + " ——";
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+  function sendChat(text){
+    text = (text || "").trim();
+    if(!text || !mqRole) return;
+    const name = ensureChatName();
+    pub({type:"chat", name, text});
+    appendChat(name, text, true);
+  }
+  function showChat(on){
+    $("chatBtn").style.display = on ? "" : "none";
+    $("chatPanel").style.display = on ? "flex" : "none";
+    if(on) $("chatRoomCode").textContent = roomCode;
+  }
+  ["👍","❤️","😂","🎉","👏","❓","🙏","💡"].forEach(em=>{
+    const b = document.createElement("button");
+    b.textContent = em;
+    b.addEventListener("click", ()=> sendChat(em));
+    $("chatEmoji").appendChild(b);
+  });
+  $("chatSend").addEventListener("click", ()=>{ sendChat($("chatText").value); $("chatText").value = ""; });
+  $("chatText").addEventListener("keydown", e=>{ if(e.key === "Enter"){ sendChat($("chatText").value); $("chatText").value = ""; } });
+  $("chatClose").addEventListener("click", ()=>{ $("chatPanel").style.display = "none"; });
+  $("chatBtn").addEventListener("click", ()=>{
+    if(!mqRole){ setStatus("請先開啟或加入直播，聊天室才會啟用"); return; }
+    const pnl = $("chatPanel");
+    pnl.style.display = pnl.style.display === "none" ? "flex" : "none";
+  });
+
   function stopShare(){
     if(mq){ try{ mq.end(true); }catch(_){} mq = null; }
     mqRole = null; roomKey = null; roomCode = "";
@@ -354,9 +451,15 @@
     $("shareBtn").textContent = "📡 分享直播：關";
     $("joinBtn").classList.remove("on");
     $("joinBtn").textContent = "👀 加入直播";
+    showChat(false);
+    $("chatLog").innerHTML = "";
   }
   $("shareBtn").addEventListener("click", async ()=>{
-    if(mqRole === "host"){ stopShare(); setStatus("直播已關閉"); return; }
+    if(mqRole === "host"){
+      await pub({type:"bye"});
+      setTimeout(()=>{ stopShare(); setStatus("直播已關閉（觀看端已收到通知）"); }, 300); // 留時間送出 bye
+      return;
+    }
     if(mqRole === "viewer"){ setStatus("觀看模式中無法開直播，請先離開觀看"); return; }
     try{
       const code = genCode();
@@ -365,6 +468,8 @@
       mqConnect(code, "host", ()=>{
         $("shareBtn").classList.add("on");
         $("shareBtn").textContent = "📡 直播中：" + code;
+        showChat(true);
+        appendChatSys("直播已開啟，驗證碼 " + code);
         setStatus("直播已開啟，驗證碼【" + code + "】。其他人開同一個網頁按「👀 加入直播」輸入即可同步觀看（不耗他們的 API）");
       });
     }catch(err){ setStatus("直播開啟失敗：" + err.message); stopShare(); }
@@ -380,6 +485,8 @@
       mqConnect(code, "viewer", ()=>{
         $("joinBtn").classList.add("on");
         $("joinBtn").textContent = "👀 觀看中（點擊離開）";
+        showChat(true);
+        appendChatSys("已加入直播 " + code);
         setStatus("已加入直播【" + code + "】，逐字稿與翻譯將同步顯示（本端不消耗 API）");
         pub({type:"hi"}); // 向主持端要目前為止的完整逐字稿
       });
@@ -852,6 +959,7 @@
       try{ recognition.start(); }catch(_){}
     }
     recording = true;
+    if(mqRole === "host") pub({type:"rec", on:true});
     if(tabStream && !headphone){
       setStatus("提醒：耳機模式未開啟——對方逐字稿目前只靠麥克風收音（喇叭模式）。戴耳機請點「🎧 耳機模式」開啟，否則對方不會有逐字稿。");
     }
@@ -863,6 +971,7 @@
   }
   function stopRec(){
     recording = false;
+    if(mqRole === "host") pub({type:"rec", on:false});
     stopTabASR();
     if(recognition){ try{ recognition.stop(); }catch(_){} recognition = null; }
     if(!tabStream && micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; micAnalyser = null; }
