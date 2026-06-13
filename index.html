@@ -88,10 +88,21 @@
   #recModeBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #shareBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #liveTrBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
+  #mobileRecBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   #vsBtn.on{background:var(--teal); border-color:var(--teal); color:#fff; font-weight:600}
   .live-row{padding:8px 0; font-size:14px; line-height:1.7; color:var(--ink-2); font-style:italic; border-bottom:1px dashed var(--line)}
   .live-row .zh{color:var(--teal-dark)}
   #joinBtn.on{background:#FBF3E2; border-color:var(--amber); color:var(--amber); font-weight:600}
+  #mobileKeyPanel{position:fixed; left:0; right:0; bottom:0; z-index:60;
+    background:var(--panel); border-top:2px solid var(--teal); padding:14px 16px 18px;
+    box-shadow:0 -4px 20px rgba(0,0,0,.15); display:none; flex-direction:column; gap:10px}
+  #mobileKeyPanel h3{font-size:14px; font-weight:700; color:var(--ink)}
+  #mobileKeyPanel input{font:13px var(--mono); border:1px solid var(--line); border-radius:8px;
+    padding:8px 10px; width:100%}
+  #mobileKeyPanel .row{display:flex; gap:8px; align-items:center}
+  #mobileKeyPanel label{font-size:12px; color:var(--ink-2); white-space:nowrap}
+  #mobileKeyPanel select{font:13px inherit; border:1px solid var(--line); border-radius:8px;
+    padding:7px 8px; flex:1}
   #chatPanel{position:fixed; right:16px; bottom:52px; width:300px; height:380px; z-index:50;
     background:var(--panel); border:1px solid var(--line); border-radius:12px;
     box-shadow:0 8px 28px rgba(0,0,0,.14); display:flex; flex-direction:column; overflow:hidden}
@@ -134,6 +145,7 @@
   </select>
   <button id="tabBtn" title="擷取 Teams／Meet 的會議聲音，用於自動分辨我方／對方">🔗 連接會議音訊</button>
   <button id="transBtn" title="外語段落自動翻成繁體中文，顯示在原文下方">🈂 即時翻譯：關</button>
+  <button id="mobileRecBtn" title="手機主持：純麥克風收音，我方走 API 轉文字+翻譯，適合實體會議或手機主持線上會議（僅能收到自己的聲音）" style="display:none">📱 手機收音：關</button>
   <button id="liveTrBtn" title="Gemini 3.5 Live Translate：對方外語即時同傳成中文語音＋字幕（需 Gemini Key + 連接會議音訊）">🛰 Live 同傳：關</button>
   <button id="recModeBtn" title="一鍵開啟完整會議記錄：我方與對方都走 API 高品質轉文字">📝 記錄模式：關</button>
   <button id="vsBtn" title="把 Live 同傳的中文語音同步播給直播觀看端（需同時開啟 Live 同傳與分享直播）">🔈 同傳語音直播：關</button>
@@ -211,6 +223,7 @@
 </main>
 
 <footer>
+  <button id="mobileKeyBtn" style="font-size:12px;padding:4px 10px;display:none">⚙ 金鑰設定</button>
   <span id="status">待命</span>
   <span class="meter">我方 <i id="micDot"></i></span>
   <span class="meter">對方 <i id="tabDot"></i></span>
@@ -219,6 +232,22 @@
   <span>逐字稿與摘要僅存於本頁，不上傳雲端 · 建議使用 Chrome / Edge</span>
 </footer>
 
+<div id="mobileKeyPanel">
+  <h3>⚙ 金鑰設定</h3>
+  <input type="password" id="mkGemini" placeholder="Gemini Key（AIza...）">
+  <div class="row">
+    <label>Gemini 模型</label>
+    <select id="mkModel">
+      <option value="gemini-3.1-flash-lite">3.1 Flash Lite（免費額度最高）</option>
+      <option value="gemini-2.5-flash-lite">2.5 Flash Lite</option>
+      <option value="gemini-2.5-flash">2.5 Flash</option>
+    </select>
+  </div>
+  <div class="row" style="justify-content:flex-end;gap:8px">
+    <button id="mkSave" class="btn-primary">儲存並關閉</button>
+    <button id="mkClose">取消</button>
+  </div>
+</div>
 <div id="chatPanel" style="display:none">
   <div class="chat-head">💬 直播聊天室 <span class="code" id="chatRoomCode"></span><button id="chatClose" title="收合">✕</button></div>
   <div id="chatLog"></div>
@@ -368,6 +397,7 @@
     if(mqRole === "host"){
       if(m.type === "hi"){
         pub({type:"snapshot", segs: snapshotSegs()});
+        if(voiceShare) pub({type:"vs", on:true});
         appendChatSys("有觀眾加入直播");
       }
       return;
@@ -389,6 +419,11 @@
       case "seg": applyRemoteSeg(m); break;
       case "zh": attachZhRemote(m.id, m.zh); break;
       case "pcm": playSharedPcm(m.d); break;
+      case "vs":
+        appendChatSys(m.on ? "主持端已開啟同傳語音直播" : "主持端已關閉同傳語音直播");
+        setStatus(m.on ? "主持端正在推送同傳語音——若沒聽到，請確認手機媒體音量並點擊解鎖按鈕" : "主持端已停止同傳語音");
+        if(m.on) ensureAudioUnlock();
+        break;
       case "edit": { const r = segById[m.id]; if(r){ r.seg.text = m.text; r.p.textContent = m.text; } break; }
       case "who": { const r = segById[m.id]; if(r && r.chip){ r.seg.who = m.who; r.chip.textContent = m.who; r.chip.className = "who " + whoClass(m.who); } break; }
       case "del": { const r = segById[m.id]; if(r){ const i = segments.indexOf(r.seg); if(i > -1) segments.splice(i, 1); r.div.remove(); delete segById[m.id]; } break; }
@@ -545,17 +580,24 @@
     vsBuf = [];
     pub({type:"pcm", d: f32ToPcm16b64(all)});
   }
-  let shPlayT = 0;
+  let shPlayT = 0, audioUnlockBtn = null;
+  function ensureAudioUnlock(){
+    audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state !== "suspended" || audioUnlockBtn) return;
+    audioUnlockBtn = document.createElement("button");
+    audioUnlockBtn.textContent = "🔊 點此啟用同傳語音播放";
+    audioUnlockBtn.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:99;padding:11px 20px;background:var(--teal);color:#fff;border:none;border-radius:24px;font-weight:700;font-size:14px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer";
+    audioUnlockBtn.addEventListener("click", ()=>{
+      audioCtx.resume();
+      if(audioUnlockBtn){ audioUnlockBtn.remove(); audioUnlockBtn = null; }
+      setStatus("語音播放已啟用");
+    });
+    document.body.appendChild(audioUnlockBtn);
+  }
   function playSharedPcm(d){
     try{
       audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
-      if(audioCtx.state === "suspended"){
-        audioCtx.resume();
-        if(!window.__vsHint){ window.__vsHint = true;
-          setStatus("收到同傳語音：若沒聽到聲音，請點擊頁面任意處啟用播放");
-          document.addEventListener("click", ()=> audioCtx.resume(), {once:true});
-        }
-      }
+      if(audioCtx.state === "suspended"){ audioCtx.resume(); ensureAudioUnlock(); }
       const bytes = unb64(d);
       const i16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.byteLength / 2));
       const f32 = new Float32Array(i16.length);
@@ -575,11 +617,13 @@
       voiceShare = true;
       $("vsBtn").classList.add("on");
       $("vsBtn").textContent = "🔈 同傳語音直播：開";
+      pub({type:"vs", on:true});
       setStatus("同傳語音直播已開啟：觀看端將同步聽到中文翻譯語音（延遲約 1–2 秒）");
     } else {
       voiceShare = false;
       $("vsBtn").classList.remove("on");
       $("vsBtn").textContent = "🔈 同傳語音直播：關";
+      pub({type:"vs", on:false});
       setStatus("同傳語音直播已關閉（字幕同步不受影響）");
     }
   });
@@ -717,6 +761,73 @@
     }
   }
   $("liveTrBtn").addEventListener("click", ()=> liveOn ? (stopLiveTr(), setStatus("Live 同傳已關閉")) : startLiveTr());
+
+  /* ---------- 📱 手機收音模式 ---------- */
+  let mobileRecMode = false;
+  function setMobileRecModeUI(on){
+    mobileRecMode = on;
+    $("mobileRecBtn").classList.toggle("on", on);
+    $("mobileRecBtn").textContent = on ? "📱 手機收音：開" : "📱 手機收音：關";
+  }
+  $("mobileRecBtn").addEventListener("click", ()=>{
+    if(mobileRecMode){
+      setMobileRecModeUI(false);
+      headphone = false;
+      $("hpBtn").classList.remove("on");
+      $("hpBtn").textContent = "🎧 耳機模式：關";
+      $("micApi").checked = false;
+      setStatus("手機收音模式已關閉");
+      return;
+    }
+    if(!asrKey()){ setStatus("手機收音模式需要先填入 Gemini Key（頁尾 ⚙ 金鑰設定）"); return; }
+    headphone = true;
+    $("hpBtn").classList.add("on");
+    $("hpBtn").textContent = "🎧 耳機模式：開";
+    $("micApi").checked = true;
+    setMobileRecModeUI(true);
+    if(recording){
+      if(recognition){ try{ recognition.stop(); }catch(_){} recognition = null; }
+      micASR.start();
+      setStatus("手機收音模式已啟動：麥克風 → API 轉文字+翻譯（按開始錄音即生效）");
+    } else {
+      setStatus("手機收音模式：開——按「開始錄音」即以麥克風 API 轉文字並自動翻譯外語");
+    }
+  });
+
+  /* ---------- 手機設定面板 ---------- */
+  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  if(isMobile){
+    $("mobileKeyBtn").style.display = "";
+    $("mobileRecBtn").style.display = "";
+    // 手機不支援的功能按鈕隱藏
+    $("tabBtn").style.display = "none";
+    $("liveTrBtn").style.display = "none";
+    $("vsBtn").style.display = "none";
+    const settingsRow = document.querySelector(".settings");
+    if(settingsRow) settingsRow.style.display = "none";
+  }
+  function syncMobileToMain(){
+    const gk = $("mkGemini").value.trim();
+    const gm = $("mkModel").value;
+    if(gk){ $("geminiKey").value = gk; }
+    if(gm){ $("geminiModel").value = gm; }
+    // 手機預設全 Gemini
+    $("asrProv").value = "gemini";
+    $("llmProv").value = "gemini";
+  }
+  $("mobileKeyBtn").addEventListener("click", ()=>{
+    // 把主設定欄的值同步回來
+    $("mkGemini").value = $("geminiKey").value;
+    $("mkModel").value = $("geminiModel").value;
+    $("mobileKeyPanel").style.display = "flex";
+  });
+  $("mkSave").addEventListener("click", ()=>{
+    syncMobileToMain();
+    $("mobileKeyPanel").style.display = "none";
+    const ok = $("geminiKey").value.trim();
+    setStatus(ok ? "金鑰已儲存（Gemini " + $("geminiModel").options[$("geminiModel").selectedIndex].text.split("（")[0] + "）——請按「📱 手機收音」再按「開始錄音」" : "金鑰未填，請重新設定");
+  });
+  $("mkClose").addEventListener("click", ()=>{ $("mobileKeyPanel").style.display = "none"; });
 
   /* ---------- Playbook 上傳 ---------- */
   $("loadFileBtn").addEventListener("click", ()=> $("fileInput").click());
@@ -915,6 +1026,16 @@
 
   const asrKey = () => ($("asrProv").value === "gemini" ? $("geminiKey") : $("openaiKey")).value.trim();
 
+  /* ---- 偵測瀏覽器支援的 MediaRecorder 格式 ---- */
+  function getBestMime(){
+    const list = ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4;codecs=mp4a.40.2","audio/mp4","audio/aac"];
+    for(const t of list){ try{ if(MediaRecorder.isTypeSupported(t)) return t; }catch(_){} }
+    return "";
+  }
+  const BEST_MIME = getBestMime();
+  function mimeToExt(m){ if(!m) return "webm"; if(m.includes("mp4")||m.includes("aac")) return "mp4"; if(m.includes("ogg")) return "ogg"; return "webm"; }
+  function mimeForGemini(m){ if(!m) return "audio/webm"; if(m.startsWith("audio/")) return m.split(";")[0]; return "audio/webm"; }
+
   /* ---- Gemini 模型自動備援：限流時依序改用其他模型，冷卻後回到主模型 ---- */
   const modelCooldown = {}; // model -> 冷卻到期時間戳
   const FALLBACK_ORDER = ["gemini-3.1-flash-lite","gemini-2.5-flash-lite","gemini-2.5-flash","gemini-3-flash","gemini-3.5-flash"];
@@ -951,12 +1072,13 @@
       if($("asrProv").value === "gemini"){
         const b64 = await blobToBase64(blob);
         const gmodel = pickGeminiModel();
+        const blobMime = (blob.type && blob.type !== "") ? blob.type.split(";")[0] : mimeForGemini(BEST_MIME);
         const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + gmodel + ":generateContent?key=" + encodeURIComponent(key), {
           method:"POST",
           headers:{ "Content-Type":"application/json" },
           body: JSON.stringify({
             contents:[{ parts:[
-              { inline_data:{ mime_type:"audio/webm", data: b64 } },
+              { inline_data:{ mime_type: blobMime, data: b64 } },
               { text:"逐字轉錄這段音訊，維持原語言；若同一段內混用多種語言（如中文與日文），各自照原語言轉錄，不要翻譯。只輸出轉錄文字本身，不要任何說明；若沒有語音請輸出空白。" }
             ]}]
           })
@@ -975,7 +1097,7 @@
         text = ((d.candidates||[])[0]?.content?.parts||[]).map(x=>x.text||"").join("").trim();
       } else {
         const fd = new FormData();
-        fd.append("file", blob, "chunk.webm");
+        fd.append("file", blob, "chunk." + mimeToExt(BEST_MIME));
         fd.append("model", "gpt-4o-mini-transcribe");
         const wl = whisperLang();
         if(wl) fd.append("language", wl);
@@ -1003,7 +1125,7 @@
       const timeStr = now();
       chunkStart = Date.now();
       const startedAtMs = chunkStart;
-      mr = new MediaRecorder(new MediaStream(tracks), {mimeType:"audio/webm"});
+      mr = BEST_MIME ? new MediaRecorder(new MediaStream(tracks), {mimeType: BEST_MIME}) : new MediaRecorder(new MediaStream(tracks));
       mr.ondataavailable = ev=>{
         const frames = activity.filter(a => a.t >= startedAtMs && a[voicedKey]).length; // 每格 100ms
         const need = voicedKey === "mic" ? 5 : 3;
@@ -1086,10 +1208,10 @@
     setRecordModeUI(true);
     const issues = [];
     if(!asrKey()) issues.push("「轉文字用」對應的 API Key 未填");
-    if(!tabStream) issues.push("尚未按「🔗 連接會議音訊」");
+    if(!tabStream && !isMobile) issues.push("尚未按「🔗 連接會議音訊」");
     if(issues.length){
       setStatus("記錄模式：開（我方+對方都走 API 轉文字），但還缺：" + issues.join("、"));
-      return;
+      if(!asrKey()) return; // Key 沒填才真的阻塞；手機缺 tabStream 仍繼續啟動我方
     }
     if(recording){
       // 錄音中熱切換：關掉瀏覽器辨識，雙聲道改走 API
@@ -1175,13 +1297,14 @@
 
   async function startRec(){
     const micViaApi = headphone && $("micApi").checked && asrKey();
-    if(!SR && !micViaApi){ setStatus("此瀏覽器不支援語音辨識，請改用 Chrome 或 Edge"); return; }
+    const noSR = !SR || ($("lang").value !== "auto" && isMobile && /iPhone|iPad|iPod/i.test(navigator.userAgent));
+    if(noSR && !micViaApi){ setStatus("iOS Safari 不支援瀏覽器語音辨識，請先按「📱 手機收音」開啟 API 轉文字模式"); return; }
     if(!await ensureMic()) return; // 先取得並保持麥克風，辨識重啟時才不會再跳權限視窗
     endTimes.length = 0;
     if(bc) bc.postMessage({type:"rec-start", id: tabId}); // 通知其他分頁讓出辨識引擎
-    if(micViaApi){
+    if(micViaApi || (noSR && asrKey())){
       micASR.start();
-      setDiag("我方改用 API 轉文字（約每 8 秒一段）");
+      setDiag("我方走 API 轉文字（停頓後出字）");
     } else {
       recognition = buildRecognition();
       try{ recognition.start(); }catch(_){}
