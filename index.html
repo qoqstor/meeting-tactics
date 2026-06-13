@@ -243,6 +243,12 @@
       <option value="gemini-2.5-flash">2.5 Flash</option>
     </select>
   </div>
+  <div class="row" style="font-size:13px;gap:8px;padding:4px 0">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" id="mkNoEC">
+      <span>📺 影片音源模式（停用回音消除，可收到手機喇叭聲）</span>
+    </label>
+  </div>
   <div class="row" style="justify-content:flex-end;gap:8px">
     <button id="mkSave" class="btn-primary">儲存並關閉</button>
     <button id="mkClose">取消</button>
@@ -816,16 +822,20 @@
     $("llmProv").value = "gemini";
   }
   $("mobileKeyBtn").addEventListener("click", ()=>{
-    // 把主設定欄的值同步回來
     $("mkGemini").value = $("geminiKey").value;
     $("mkModel").value = $("geminiModel").value;
+    $("mkNoEC").checked = micNoEC;
     $("mobileKeyPanel").style.display = "flex";
   });
-  $("mkSave").addEventListener("click", ()=>{
+  $("mkSave").addEventListener("click", async ()=>{
     syncMobileToMain();
+    const wasNoEC = micNoEC;
+    micNoEC = $("mkNoEC").checked;
     $("mobileKeyPanel").style.display = "none";
     const ok = $("geminiKey").value.trim();
-    setStatus(ok ? "金鑰已儲存（Gemini " + $("geminiModel").options[$("geminiModel").selectedIndex].text.split("（")[0] + "）——請按「📱 手機收音」再按「開始錄音」" : "金鑰未填，請重新設定");
+    const ecTip = micNoEC ? "（📺 影片音源模式：回音消除已停用）" : "";
+    setStatus(ok ? "金鑰已儲存" + ecTip + "——請按「📱 手機收音」再按「開始錄音」" : "金鑰未填，請重新設定");
+    if(micNoEC !== wasNoEC && recording){ await ensureMic(true); setStatus("麥克風設定已更新" + ecTip); }
   });
   $("mkClose").addEventListener("click", ()=>{ $("mobileKeyPanel").style.display = "none"; });
 
@@ -1279,10 +1289,15 @@
     return rec;
   }
 
-  async function ensureMic(){
-    if(micStream && micStream.getAudioTracks().some(t=>t.readyState === "live")) return true;
+  let micNoEC = false; // 是否停用回音消除（手機影片音源模式）
+  async function ensureMic(forceReopen){
+    if(!forceReopen && micStream && micStream.getAudioTracks().some(t=>t.readyState === "live")) return true;
+    if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream = null; micAnalyser = null; }
     try{
-      micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+      const constraints = micNoEC
+        ? {audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}}
+        : {audio:true};
+      micStream = await navigator.mediaDevices.getUserMedia(constraints);
       audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
       if(audioCtx.state === "suspended") audioCtx.resume();
       micAnalyser = audioCtx.createAnalyser(); micAnalyser.fftSize = 512;
